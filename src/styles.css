@@ -1,0 +1,1269 @@
+/* Packetboat — theme. Colours come from the design-handoff tokens in theme.css
+   (the `--pb-*` set, which flips for [data-theme="light"]). The app's own
+   variable names alias onto those tokens, so every existing rule below picks up
+   the brand palette and themes automatically. */
+
+:root {
+  --bg: var(--pb-bg);
+  --surface: var(--pb-surface);
+  --surface-2: var(--pb-surface-2);
+  --surface-3: var(--pb-surface-2);
+  --row-hover: var(--pb-row-hover);
+  --row-active: var(--pb-selection);
+  --border: var(--pb-border);
+  --border-strong: var(--pb-border);
+
+  --text: var(--pb-text);
+  --muted: var(--pb-text-2);
+  --faint: var(--pb-text-muted);
+
+  --accent: var(--pb-accent);
+  --accent-hover: var(--pb-accent-hover);
+  --accent-soft: var(--pb-icon);
+  --on-accent: var(--pb-on-accent);
+  --danger: var(--pb-danger);
+  --ok: var(--pb-success);
+  --scrollbar: var(--pb-scrollbar);
+  --scrollbar-hover: var(--pb-text-muted);
+
+  --radius: 9px;
+  --radius-sm: 6px;
+
+  font-family: var(--pb-font-ui);
+  font-size: 13px;
+  color: var(--text);
+  background-color: var(--bg);
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+  user-select: none;
+}
+
+.app {
+  height: 100vh;
+  display: grid;
+  grid-template-rows: auto auto auto auto 1fr auto auto;
+}
+
+/* ---------- App bar ---------- */
+.appbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  background: var(--pb-bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+}
+
+.brand-mark {
+  width: 64px;
+  height: auto;
+}
+
+/* Auto-themed sloop mark: each part recolours with the theme tokens. */
+.brand-mark .pb-logo-1 {
+  fill: var(--pb-logo-1);
+}
+.brand-mark .pb-logo-2 {
+  fill: var(--pb-logo-2);
+}
+.brand-mark .pb-logo-3 {
+  fill: var(--pb-logo-3);
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+
+.brand-name {
+  font-family: var(--pb-font-brand);
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: 0.2px;
+}
+
+/* Two-tone wordmark: "Packet" + "boat" recolour with the theme.
+   Dark:  Packet #2E9BD6 (logo-1) · boat #9DB2C3
+   Light: Packet #0C2233 (logo-1) · boat #15598C */
+.brand-name .wm-1 {
+  color: var(--pb-logo-1);
+}
+.brand-name .wm-2 {
+  color: #9db2c3;
+}
+:root[data-theme="light"] .brand-name .wm-2 {
+  color: #15598c;
+}
+
+.brand-tag {
+  font-size: 12px;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 1.4px;
+}
+
+.appbar-left {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+/* ---------- Connection tabs ---------- */
+.tab-bar {
+  display: flex;
+  gap: 2px;
+  padding: 5px 10px 0;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+/* Collapse to nothing when there are no tabs, but stay a grid item so the
+   panes keep their 1fr track (and the status bar stays on screen). */
+.tab-bar:empty {
+  padding: 0;
+  border-bottom: none;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 240px;
+  padding: 6px 8px 6px 12px;
+  font-size: 13px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 7px 7px 0 0;
+  cursor: pointer;
+}
+
+.tab.active {
+  color: var(--text);
+  background: var(--bg);
+  border-color: var(--border-strong);
+}
+
+.tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-close {
+  flex: none;
+  appearance: none;
+  border: none;
+  background: none;
+  color: var(--faint);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.tab-close:hover {
+  color: var(--text);
+  background: var(--surface-3);
+}
+
+/* ---------- Toolbar ---------- */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tool-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  width: 30px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+
+.tool-btn:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.tool-btn.active {
+  color: var(--accent-soft);
+  background: var(--surface-3);
+}
+
+.tool-btn svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tool-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+.conn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.conn-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.conn-status .dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--faint);
+  box-shadow: 0 0 0 3px rgba(110, 118, 129, 0.15);
+}
+
+.conn-status[data-state="on"] {
+  color: var(--text);
+}
+
+.conn-status[data-state="on"] .dot {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.2);
+}
+
+.conn-status[data-state="busy"] .dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+}
+
+/* ---------- Buttons & inputs ---------- */
+.btn {
+  appearance: none;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-3);
+  color: var(--text);
+  padding: 7px 14px;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.btn:hover {
+  background: var(--surface-3);
+  border-color: var(--faint);
+}
+
+.btn:active {
+  transform: translateY(0.5px);
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.icon-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+
+.icon-btn:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+input,
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+input:focus,
+select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
+}
+
+input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Hide the native number spinners — they don't match the theme and let you
+   step into invalid values. Ports are typed directly. */
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+}
+
+/* ---------- Panes ---------- */
+.panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 12px;
+  min-height: 0;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.pane-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.pane-title {
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  padding: 0 2px;
+}
+
+.pane-tools {
+  display: flex;
+  gap: 2px;
+}
+
+.pane-head .path {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  padding: 5px 9px;
+}
+
+/* ---------- Folder tree ---------- */
+.tree {
+  flex: 0 0 38%;
+  min-height: 64px;
+  overflow: auto;
+  padding: 4px 0;
+  background: var(--pb-bg);
+  border-bottom: 1px solid var(--border);
+  /* Folder names are data → Space Mono. */
+  font-family: var(--pb-font-data);
+}
+
+.tree-node {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding-right: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.tree-node:hover {
+  background: var(--row-hover);
+}
+
+.tree-node.selected {
+  background: var(--row-active);
+}
+
+.tree-node.drop-target {
+  background: var(--row-active);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.tree-chevron {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 26px;
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+
+.tree-chevron:hover {
+  color: var(--text);
+}
+
+.tree-chevron.open {
+  transform: rotate(90deg);
+}
+
+.tree-node .ico {
+  flex: none;
+  stroke: var(--accent-soft);
+}
+
+.tree-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-empty {
+  padding: 14px 12px;
+  color: var(--faint);
+  font-size: 12.5px;
+}
+
+/* ---------- File list ---------- */
+.list {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  position: relative;
+}
+
+.list-head,
+.row {
+  display: grid;
+  grid-template-columns: 1fr 92px 152px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+}
+
+.list-head {
+  height: 30px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--faint);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.list-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  background: var(--pb-bg);
+}
+
+.row {
+  height: 30px;
+  cursor: default;
+  border-bottom: 1px solid rgba(41, 49, 60, 0.5);
+}
+
+.row:hover {
+  background: var(--row-hover);
+}
+
+.row.selected {
+  background: var(--row-active);
+}
+
+.row.dragging {
+  opacity: 0.45;
+}
+
+.row.drop-target {
+  background: var(--row-active);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.list.drop-active {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.row.dir {
+  cursor: pointer;
+}
+
+.cell {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cell.name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cell.name .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cell.size {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.cell.date {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ico {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.7;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.row.dir .ico {
+  stroke: var(--accent-soft);
+}
+
+/* Empty / disconnected overlay */
+.pane-empty {
+  position: absolute;
+  inset: 30px 0 0 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: var(--pb-bg);
+  color: var(--muted);
+}
+
+.pane-empty p {
+  margin: 0;
+}
+
+.pane-empty[hidden] {
+  display: none;
+}
+
+.empty-mark {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.empty-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.empty-title {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.empty-sub {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* Loading / empty-folder / error messages inside a pane body. */
+.pane-msg {
+  padding: 26px 18px;
+  text-align: center;
+  color: var(--faint);
+  font-size: 13px;
+}
+
+.pane-msg.error {
+  color: var(--danger);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------- Status bar ---------- */
+.statusbar {
+  padding: 6px 16px;
+  font-size: 12.5px;
+  color: var(--muted);
+  background: var(--surface-2);
+  border-top: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- Message log ---------- */
+.logpanel {
+  display: flex;
+  flex-direction: column;
+  max-height: 150px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.logpanel[hidden] {
+  display: none;
+}
+
+.log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 14px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.log-list {
+  background: var(--pb-bg);
+  overflow-y: auto;
+  padding: 4px 0;
+  /* Message log is data → Space Mono (the handoff's --pb-font-data). */
+  font-family: var(--pb-font-data);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.log-entry {
+  display: flex;
+  gap: 10px;
+  padding: 0 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-time {
+  flex: none;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.log-msg {
+  color: var(--muted);
+}
+
+.log-entry.info .log-msg {
+  color: var(--text);
+}
+
+.log-entry.success .log-msg {
+  color: var(--ok);
+}
+
+.log-entry.error .log-msg {
+  color: var(--danger);
+}
+
+.log-entry.cmd .log-msg {
+  color: var(--accent-soft);
+}
+
+.statusbar.error {
+  color: var(--danger);
+}
+
+/* ---------- Modal ---------- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--pb-backdrop);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.modal-backdrop[hidden] {
+  display: none;
+}
+
+.modal {
+  width: 380px;
+  max-width: calc(100vw - 32px);
+  background: var(--pb-bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: var(--pb-shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modal h2 {
+  margin: 0 0 2px;
+  font-family: var(--pb-font-brand);
+  font-size: 17px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.field[hidden] {
+  display: none;
+}
+
+.field > span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.field-row {
+  display: flex;
+  gap: 12px;
+}
+
+.field-row .grow {
+  flex: 1;
+}
+
+.field-row .port {
+  width: 96px;
+}
+
+.form-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.form-error[hidden] {
+  display: none;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+/* ---------- Scrollbars ---------- */
+.list-body::-webkit-scrollbar {
+  width: 11px;
+}
+
+.list-body::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border: 3px solid var(--surface);
+  border-radius: 8px;
+}
+
+.list-body::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-hover);
+}
+
+/* ---------- Transfer queue ---------- */
+.queue {
+  display: flex;
+  flex-direction: column;
+  max-height: 200px;
+  background: var(--surface-2);
+  border-top: 1px solid var(--border);
+}
+
+.queue[hidden] {
+  display: none;
+}
+
+.queue-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 14px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.btn-link {
+  appearance: none;
+  border: none;
+  background: none;
+  color: var(--accent-soft);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.btn-link:hover {
+  text-decoration: underline;
+}
+
+.queue-list {
+  overflow-y: auto;
+  padding: 4px 0;
+  background: var(--pb-bg);
+}
+
+.q-row {
+  display: grid;
+  grid-template-columns: 18px 1fr 160px 116px;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  font-size: 13px;
+}
+
+.q-dir {
+  text-align: center;
+  font-weight: 700;
+  color: var(--accent-soft);
+}
+
+.q-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.q-bar {
+  height: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.q-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.15s ease;
+}
+
+.q-stat {
+  text-align: right;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.q-row.done .q-fill {
+  background: var(--ok);
+}
+
+.q-row.done .q-stat {
+  color: var(--ok);
+}
+
+.q-row.error .q-fill {
+  width: 100%;
+  background: var(--danger);
+}
+
+.q-row.error .q-stat {
+  color: var(--danger);
+  cursor: help;
+}
+
+.list-body::-webkit-scrollbar,
+.queue-list::-webkit-scrollbar {
+  width: 11px;
+}
+
+.queue-list::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border: 3px solid var(--surface-2);
+  border-radius: 8px;
+}
+
+/* ---------- Context menu ---------- */
+.ctx-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 168px;
+  padding: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--pb-shadow);
+}
+
+.ctx-item {
+  padding: 7px 10px;
+  border-radius: 5px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ctx-item:hover {
+  background: var(--row-hover);
+}
+
+.ctx-item.danger {
+  color: var(--danger);
+}
+
+.ctx-item.danger:hover {
+  background: rgba(248, 81, 73, 0.13);
+}
+
+.ctx-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
+/* ---------- Small dialog (prompt / confirm) ---------- */
+.modal-sm {
+  width: 340px;
+  gap: 12px;
+}
+
+.dialog-body {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.dialog-input {
+  width: 100%;
+}
+
+/* ---------- Quick connect bar ---------- */
+.quickbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.quickbar input,
+.quickbar select {
+  padding: 6px 9px;
+  font-size: 13px;
+}
+
+.quickbar .qc-proto {
+  width: 86px;
+  flex: none;
+}
+
+.quickbar .qc-host {
+  flex: 2;
+  min-width: 120px;
+}
+
+.quickbar .qc-user,
+.quickbar .qc-pass {
+  flex: 1;
+  min-width: 90px;
+}
+
+.quickbar .qc-port {
+  width: 74px;
+  flex: none;
+}
+
+.quickbar .btn {
+  flex: none;
+}
+
+/* ---------- Site manager ---------- */
+.modal-lg {
+  width: 720px;
+  height: 580px;
+  min-width: 680px;
+  min-height: 460px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  resize: both;
+  overflow: hidden;
+}
+
+.modal-lg .sites-layout {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Let both columns shrink so their content scrolls instead of overflowing. */
+.modal-lg .sites-layout > * {
+  min-height: 0;
+}
+
+.modal-lg .sites-list {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+
+/* Let the form column scroll rather than overlap the action buttons. */
+.modal-lg .sites-form {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.sites-layout {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 16px;
+}
+
+.sites-list-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sites-list {
+  flex: 1;
+  min-height: 240px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+}
+
+.site-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 7px 9px;
+  border-radius: 5px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.site-item:hover {
+  background: var(--row-hover);
+}
+
+.site-item.selected {
+  background: var(--row-active);
+}
+
+.site-item .site-host {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.sites-empty {
+  padding: 18px 10px;
+  text-align: center;
+  color: var(--faint);
+  font-size: 13px;
+}
+
+.sites-list-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.sites-list-actions .btn {
+  flex: 1;
+  padding: 6px;
+}
+
+.sites-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* Breathing room on the right so inputs don't butt against the scrollbar,
+     matching the gap on the left. */
+  padding-right: 14px;
+}
+
+/* Inputs default to a ~170px min-width; let them shrink to their column so the
+   narrow Port field (and the rest) never overflow and clip. */
+.sites-form input,
+.sites-form select {
+  min-width: 0;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.check input {
+  width: auto;
+}
+
+.radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.radio input {
+  width: auto;
+}
+
+.hint {
+  margin: -2px 0 0;
+  font-size: 12px;
+  color: var(--faint);
+  line-height: 1.45;
+}
+
+/* Split button: "Site Manager" + dropdown caret */
+.sites-btn-group {
+  display: inline-flex;
+}
+
+.btn-caret {
+  padding: 0px 6px;
+  font-size: 18px;
+}
+
+.sites-btn-group .btn {
+  position: relative;
+}
+
+.sites-btn-group .btn:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.sites-btn-group .btn:last-child {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  /* Overlap the shared seam rather than dropping the caret's left border, so a
+     hover/focus highlight can outline all four sides. */
+  margin-left: -1px;
+}
+
+/* Raise whichever half is hovered/focused so its full border (including the
+   shared seam) draws over its neighbour instead of being clipped by it. */
+.sites-btn-group .btn:hover,
+.sites-btn-group .btn:focus-visible {
+  z-index: 1;
+}
+
+/* ---------- Themed scrollbars (global) ---------- */
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 8px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-hover);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}

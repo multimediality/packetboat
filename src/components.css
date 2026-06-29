@@ -1,0 +1,142 @@
+/* ============================================================
+   Packetboat — Component → Token mapping
+   Reference rules that bind the existing app markup (see
+   src/index.html, src/main.js) to the tokens in theme.css.
+   Import AFTER theme.css. Merge these into styles.css or keep
+   as a layer — the goal is that every colour comes from a var.
+   ============================================================ */
+
+/* Base ------------------------------------------------------- */
+/* Chrome defaults to Sora (--pb-font-ui); data elements below opt
+   into Space Mono (--pb-font-data) so file lists/paths/log stay
+   monospaced and tabular. */
+body {
+  margin: 0;
+  background: var(--pb-bg);
+  color: var(--pb-text);
+  font-family: var(--pb-font-ui);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* App bar ---------------------------------------------------- */
+.appbar { background: var(--pb-bg); border-bottom: 1px solid var(--pb-border); }
+.brand-name { font-family: var(--pb-font-brand); font-weight: 700; color: var(--pb-text); }
+.brand-tag  { color: var(--pb-text-muted); text-transform: uppercase; letter-spacing: 2px; font-size: 9px; }
+
+.conn-status .dot                  { background: var(--pb-text-muted); }
+.conn-status[data-state="on"]  .dot { background: var(--pb-success); }
+.conn-status[data-state="off"] .dot { background: var(--pb-text-muted); }
+.conn-label { color: var(--pb-text-2); }
+
+/* Buttons ---------------------------------------------------- */
+.btn {
+  background: var(--pb-surface-2);
+  color: var(--pb-text);
+  border: 1px solid var(--pb-border);
+  border-radius: var(--pb-radius);
+  font-family: var(--pb-font-ui);
+  transition: border-color var(--pb-transition), background var(--pb-transition);
+}
+.btn:hover { border-color: var(--pb-accent); }
+.btn-primary { background: var(--pb-accent); color: var(--pb-on-accent); border-color: transparent; }
+.btn-primary:hover { background: var(--pb-accent-hover); }
+.btn-link { background: none; border: none; color: var(--pb-accent); }
+
+/* Inputs ----------------------------------------------------- */
+/* Field VALUES are technical strings (hosts, paths, ports) so they
+   use the data font; placeholders/labels inherit chrome. */
+.quickbar { background: var(--pb-surface); border-bottom: 1px solid var(--pb-border); }
+.quickbar input,
+.quickbar select,
+.path,
+.field input,
+.field select {
+  background: var(--pb-input-bg);
+  color: var(--pb-text);
+  border: 1px solid var(--pb-border);
+  border-radius: var(--pb-radius-sm);
+  font-family: var(--pb-font-data);
+}
+input:focus, select:focus {
+  outline: none;
+  border-color: var(--pb-accent);
+  box-shadow: 0 0 0 3px var(--pb-focus-ring);
+}
+::placeholder { color: var(--pb-text-muted); }
+
+/* Panes & file lists ---------------------------------------- */
+.panes { background: var(--pb-bg); }
+.pane  { background: var(--pb-surface); border: 1px solid var(--pb-border); }
+.pane-title { color: var(--pb-text-2); text-transform: uppercase; letter-spacing: 1px; font-size: 11px; }
+.icon-btn { background: none; border: none; color: var(--pb-text-muted); }
+.icon-btn:hover { color: var(--pb-text); }
+
+.list-head { color: var(--pb-text-muted); border-bottom: 1px solid var(--pb-surface-2);
+             font-family: var(--pb-font-data);
+             text-transform: uppercase; letter-spacing: 1px; font-size: 10px; }
+.cell.size, .cell.date { color: var(--pb-text-muted); }
+
+.list-body .row { color: var(--pb-text); font-family: var(--pb-font-data); } /* file names, sizes, dates = data */
+.list-body .row:hover { background: var(--pb-row-hover); }
+.list-body .row.selected {
+  background: var(--pb-selection);
+  box-shadow: inset 2px 0 0 var(--pb-accent);   /* accent edge marker */
+}
+.row .label { color: var(--pb-text); }
+.row .ico   { fill: var(--pb-icon); }            /* dir/file glyphs are filled */
+
+/* Remote empty state */
+.empty-title { color: var(--pb-text-2); }
+.empty-sub   { color: var(--pb-text-muted); }
+.empty-mark  { fill: none; stroke: var(--pb-border); stroke-width: 1.6;
+               stroke-linejoin: round; stroke-linecap: round; }
+
+/* Transfer queue -------------------------------------------- */
+.queue { background: var(--pb-surface); border-top: 1px solid var(--pb-border); }
+.queue-head { color: var(--pb-text-2); }
+.q-row { color: var(--pb-text); font-family: var(--pb-font-data); } /* transfer file names + stats = data */
+.q-dir { color: var(--pb-accent); }
+.q-bar  { background: var(--pb-surface-2); border-radius: 999px; overflow: hidden; }
+.q-fill { background: var(--pb-accent); }
+.q-stat { color: var(--pb-text-muted); }
+.q-row.done  .q-fill { background: var(--pb-success); }
+.q-row.done  .q-stat { color: var(--pb-success); }
+.q-row.error .q-fill { background: var(--pb-danger); }
+.q-row.error .q-stat { color: var(--pb-danger); }
+
+/* Status bar ------------------------------------------------- */
+/* Status/message-log lines are technical output → data font. */
+.statusbar { background: var(--pb-surface); border-top: 1px solid var(--pb-border); color: var(--pb-text-2);
+             font-family: var(--pb-font-data); }
+.statusbar.error #status-msg, #status-msg.error { color: var(--pb-danger); }
+
+/* Message log (the panel under the quickbar) is data too. */
+.msglog, .msglog * { font-family: var(--pb-font-data); }
+
+/* Site Manager modal ---------------------------------------- */
+.modal-backdrop { background: var(--pb-backdrop); }
+.modal { background: var(--pb-bg); border: 1px solid var(--pb-border);
+         border-radius: var(--pb-radius-lg); box-shadow: var(--pb-shadow); color: var(--pb-text); }
+.modal h2 { font-family: var(--pb-font-brand); color: var(--pb-text); }
+.field span { color: var(--pb-text-2); }
+.site-item { color: var(--pb-text); border-radius: var(--pb-radius-sm); }
+.site-item:hover { background: var(--pb-row-hover); }
+.site-item.selected { background: var(--pb-selection); box-shadow: inset 2px 0 0 var(--pb-accent); }
+.form-error { color: var(--pb-danger); }
+
+/* Scrollbars ------------------------------------------------- */
+* { scrollbar-color: var(--pb-scrollbar) transparent; scrollbar-width: thin; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--pb-scrollbar); border-radius: 999px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ============================================================
+   Brand mark (auto-themed sloop)
+   Replace the inline <svg class="brand-mark"> in index.html with
+   the markup in README "Logo" section. Its parts are class-tagged
+   so it recolours with the theme — no per-theme asset swap needed.
+   ============================================================ */
+.brand-mark .pb-logo-1 { fill: var(--pb-logo-1); } /* hull, mast, "Packet", accent cubes */
+.brand-mark .pb-logo-2 { fill: var(--pb-logo-2); } /* sail */
+.brand-mark .pb-logo-3 { fill: var(--pb-logo-3); } /* alternating cubes */

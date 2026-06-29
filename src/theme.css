@@ -1,0 +1,92 @@
+/* ============================================================
+   Packetboat — Theme Tokens
+   Dark is the DEFAULT theme (matches the current app).
+   Switch by setting   <html data-theme="light">  or  "dark".
+   Pair with theme-toggle.js to persist + follow the OS setting.
+   ============================================================ */
+
+/* Fonts are self-hosted — see fonts.css (loaded before this file). The original
+   handoff @import of Sora + Space Mono from Google Fonts is intentionally
+   removed so the desktop app has no runtime network font dependency. */
+
+:root {
+  /* Type ---------------------------------------------------- */
+  --pb-font-brand: 'Sora', system-ui, sans-serif;     /* logo + headings */
+  --pb-font-ui:    'Sora', system-ui, sans-serif;     /* chrome: buttons, labels, status, dropdowns, empty states */
+  --pb-font-data:  'Space Mono', ui-monospace, monospace; /* data: file lists, paths, hosts, message log, timestamps */
+
+  /* Radius -------------------------------------------------- */
+  --pb-radius-sm: 5px;   /* inputs, small chips        */
+  --pb-radius:    6px;   /* buttons, rows              */
+  --pb-radius-lg: 10px;  /* panels, modals, cards      */
+
+  /* Spacing scale (4pt) ------------------------------------- */
+  --pb-space-1: 4px;
+  --pb-space-2: 8px;
+  --pb-space-3: 12px;
+  --pb-space-4: 16px;
+  --pb-space-5: 24px;
+
+  /* Motion -------------------------------------------------- */
+  --pb-transition: 140ms ease;
+}
+
+/* ---------- DARK (default) ---------------------------------- */
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --pb-bg:           #0A1622; /* app background            */
+  --pb-surface:      #0F2030; /* panels & file lists       */
+  --pb-surface-2:    #16293B; /* header / hover / selected */
+  --pb-border:       #20374B; /* dividers & inputs         */
+  --pb-text:         #E7F1F8; /* primary text              */
+  --pb-text-2:       #9DB2C3; /* secondary / column heads  */
+  --pb-text-muted:   #5E7588; /* metadata / timestamps     */
+  --pb-accent:       #2E9BD6; /* primary action / links    */
+  --pb-accent-hover: #50B2E6; /* hover                     */
+  --pb-on-accent:    #07131D; /* text on accent fill       */
+  --pb-icon:         #4FB0E4; /* folder & file glyphs      */
+  --pb-logo-1:       #2E9BD6; /* logo hull/mast + "Packet" + main cubes (signal) */
+  --pb-logo-2:       #E7F1F8; /* logo sail (foam on dark) */
+  --pb-logo-3:       #9DB2C3; /* logo "boat" + alt cubes (steel, 8.3:1 on --pb-bg) */
+  --pb-selection:    rgba(46,155,214,0.16); /* selected row fill */
+  --pb-success:      #36B37E; /* transfer complete         */
+  --pb-danger:       #E5675F; /* error / failed auth       */
+
+  /* derived component tokens */
+  --pb-input-bg:    #16293B;
+  --pb-row-hover:   rgba(255,255,255,0.04);
+  --pb-focus-ring:  rgba(46,155,214,0.45);
+  --pb-scrollbar:   #243A50;
+  --pb-shadow:      0 6px 22px rgba(0,0,0,0.30);
+  --pb-backdrop:    rgba(4,10,18,0.60);
+}
+
+/* ---------- LIGHT ------------------------------------------- */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --pb-bg:           #F2F7FB;
+  --pb-surface:      #FFFFFF;
+  --pb-surface-2:    #E8F1F8;
+  --pb-border:       #D3E1ED;
+  --pb-text:         #0C2233;
+  --pb-text-2:       #41586B;
+  --pb-text-muted:   #7C90A1;
+  --pb-accent:       #15598C;
+  --pb-accent-hover: #1A6CA8;
+  --pb-on-accent:    #FFFFFF;
+  --pb-icon:         #2E9BD6;
+  --pb-logo-1:       #0C2233; /* logo hull/mast + "Packet" + main cubes (navy on light) */
+  --pb-logo-2:       #15598C; /* logo sail (harbor on light) */
+  --pb-logo-3:       #2E9BD6; /* logo alt cubes (signal on light) */
+  --pb-selection:    rgba(21,89,140,0.10);
+  --pb-success:      #1F8A5B;
+  --pb-danger:       #C2453F;
+
+  --pb-input-bg:    #FFFFFF;
+  --pb-row-hover:   #EAF1F7;
+  --pb-focus-ring:  rgba(21,89,140,0.35);
+  --pb-scrollbar:   #C9D9E6;
+  --pb-shadow:      0 6px 22px rgba(12,34,51,0.10);
+  --pb-backdrop:    rgba(12,34,51,0.35);
+}

@@ -1,0 +1,24 @@
+Packetboat
+Copyright (C) 2026 Packetboat contributors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See the LICENSE file for the full text.
+
+------------------------------------------------------------------------------
+Trademarks (not licensed under the GPL)
+------------------------------------------------------------------------------
+
+The name "Packetboat" and the Packetboat logo are trademarks of the Packetboat
+project. They are NOT covered by the GNU General Public License that governs
+the source code, and the GPL grants you no rights to use them.
+
+You are welcome to fork and redistribute this software under the terms of the
+GPL, but if you distribute a modified version you must rebrand it: remove the
+"Packetboat" name and logo and use your own project name and artwork. This
+keeps users from confusing unofficial builds with the official project.
+
+This reservation does not restrict the fair, descriptive use of the name (for
+example, stating that your product "is based on Packetboat" or "is compatible
+with Packetboat").

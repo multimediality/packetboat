@@ -1,0 +1,10 @@
+# Packetboat build configuration.
+#
+# russh's crypto backend (aws-lc-rs -> aws-lc-sys) needs the NASM assembler to
+# build its x86_64 assembly on Windows MSVC. Rather than require every
+# contributor to install NASM, we opt into the prebuilt NASM objects that
+# aws-lc-sys ships, so a stock Rust + MSVC toolchain builds Packetboat as-is.
+#
+# This only affects Windows builds; it is a no-op elsewhere.
+[env]
+AWS_LC_SYS_PREBUILT_NASM = "1"

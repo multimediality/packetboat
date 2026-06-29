@@ -1,0 +1,28 @@
+/* Self-hosted brand fonts so the desktop app doesn't depend on Google Fonts at
+   runtime. Loaded before theme.css; the --pb-font-* tokens reference these
+   family names. Sora is a variable font (one file covers 400–800); Space Mono
+   ships as two static weights. Latin subset only. */
+
+@font-face {
+  font-family: "Sora";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("fonts/sora-latin.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Space Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/space-mono-400.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Space Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/space-mono-700.woff2") format("woff2");
+}

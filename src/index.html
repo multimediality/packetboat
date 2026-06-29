@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Resolve the theme before any CSS paints, to avoid a flash of the wrong
+         theme. Mirrors applyTheme()'s saved-choice → OS → dark resolution. -->
+    <script>
+      try {
+        var s = JSON.parse(localStorage.getItem("packetboat.settings") || "{}");
+        var t = s.theme || "dark";
+        if (t === "system")
+          t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {
+        document.documentElement.setAttribute("data-theme", "dark");
+      }
+    </script>
+    <link rel="stylesheet" href="fonts.css" />
+    <link rel="stylesheet" href="theme.css" />
+    <link rel="stylesheet" href="styles.css" />
+    <!-- Handoff component→token bindings; loaded last so its exact surface
+         mappings (app bar, selection markers, focus rings) win over the base. -->
+    <link rel="stylesheet" href="components.css" />
+    <title>Packetboat</title>
+    <script type="module" src="/main.js" defer></script>
+  </head>
+
+  <body>
+    <div class="app">
+      <!-- Top bar -->
+      <header class="appbar">
+        <div class="appbar-left">
+          <div class="brand">
+            <svg class="brand-mark" width="26" height="22" viewBox="0 0 92 76" aria-hidden="true">
+              <polygon class="pb-logo-1" points="41 58 41 0 46 0 46 58 92 58 80 76 12 76 0 58 41 58" />
+              <polygon class="pb-logo-2" points="39 3 39 55 4 55 39 3" />
+              <rect class="pb-logo-1" x="53" y="28" width="15" height="15" />
+              <rect class="pb-logo-1" x="68" y="43" width="15" height="15" />
+              <rect class="pb-logo-3" x="68" y="28" width="15" height="15" />
+              <rect class="pb-logo-3" x="53" y="43" width="15" height="15" />
+            </svg>
+            <div class="brand-text">
+              <span class="brand-name"><span class="wm-1">Packet</span><span class="wm-2">boat</span></span>
+              <span class="brand-tag">file transfer</span>
+            </div>
+          </div>
+          <div class="toolbar">
+            <button class="tool-btn" id="tool-refresh" title="Refresh both panes" aria-label="Refresh">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4" /><path d="M21 4v5h-5" /></svg>
+            </button>
+            <span class="tool-sep"></span>
+            <button class="tool-btn" id="tool-log" title="Toggle message log" aria-label="Message log">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h11" /></svg>
+            </button>
+            <button class="tool-btn" id="tool-queue" title="Toggle transfer queue" aria-label="Transfer queue">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4v15" /><path d="M5 7l3-3 3 3" /><path d="M16 20V5" /><path d="M19 17l-3 3-3-3" /></svg>
+            </button>
+            <span class="tool-sep"></span>
+            <button class="tool-btn" id="tool-settings" title="Settings" aria-label="Settings">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="conn">
+          <span class="conn-status" id="conn-status" data-state="off">
+            <span class="dot"></span>
+            <span class="conn-label" id="conn-label">Not connected</span>
+          </span>
+          <div class="sites-btn-group">
+            <button class="btn" id="open-sites">Site Manager</button>
+            <button class="btn btn-caret" id="sites-dropdown" title="Quick connect to a saved site" aria-label="Saved sites">▾</button>
+          </div>
+          <button class="btn" id="disconnect-btn" hidden>Disconnect</button>
+        </div>
+      </header>
+
+      <!-- Quick connect bar -->
+      <div class="quickbar">
+        <select class="qc-proto" id="qc-protocol" title="Protocol">
+          <option value="sftp">SFTP</option>
+          <option value="ftps">FTPS</option>
+          <option value="ftp">FTP</option>
+        </select>
+        <input class="qc-host" id="qc-host" placeholder="Host" spellcheck="false" />
+        <input class="qc-user" id="qc-user" placeholder="Username" autocomplete="off" />
+        <input class="qc-pass" id="qc-pass" type="password" placeholder="Password" autocomplete="off" />
+        <input class="qc-port" id="qc-port" type="number" placeholder="Port" min="1" max="65535" />
+        <button class="btn btn-primary" id="qc-connect">Quickconnect</button>
+      </div>
+
+      <!-- Message log -->
+      <section class="logpanel" id="logpanel">
+        <div class="log-head">
+          <span>Message log</span>
+          <button class="btn-link" id="log-clear">Clear</button>
+        </div>
+        <div class="log-list" id="log-list"></div>
+      </section>
+
+      <!-- Connection tabs (one per open remote connection) -->
+      <div class="tab-bar" id="tab-bar"></div>
+
+      <!-- Dual-pane browser -->
+      <main class="panes">
+        <!-- Local -->
+        <section class="pane" id="pane-local">
+          <div class="pane-head">
+            <span class="pane-title">Local</span>
+            <div class="pane-tools">
+              <button class="icon-btn" data-act="up" data-side="local" title="Up one level">↑</button>
+              <button class="icon-btn" data-act="refresh" data-side="local" title="Refresh">⟳</button>
+            </div>
+            <input class="path" id="path-local" spellcheck="false" placeholder="/" />
+          </div>
+          <div class="tree" id="tree-local"></div>
+          <div class="list">
+            <div class="list-head">
+              <span class="cell name">Name</span>
+              <span class="cell size">Size</span>
+              <span class="cell date">Modified</span>
+            </div>
+            <div class="list-body" id="body-local"></div>
+          </div>
+        </section>
+
+        <!-- Remote -->
+        <section class="pane" id="pane-remote">
+          <div class="pane-head">
+            <span class="pane-title">Remote</span>
+            <div class="pane-tools">
+              <button class="icon-btn" data-act="up" data-side="remote" title="Up one level">↑</button>
+              <button class="icon-btn" data-act="refresh" data-side="remote" title="Refresh">⟳</button>
+            </div>
+            <input class="path" id="path-remote" spellcheck="false" placeholder="not connected" disabled />
+          </div>
+          <div class="tree" id="tree-remote"></div>
+          <div class="list">
+            <div class="list-head">
+              <span class="cell name">Name</span>
+              <span class="cell size">Size</span>
+              <span class="cell date">Modified</span>
+            </div>
+            <div class="list-body" id="body-remote"></div>
+            <div class="pane-empty" id="empty-remote">
+              <svg class="empty-mark" width="40" height="40" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 13h18l-2.2 5.2a2 2 0 0 1-1.84 1.2H7.04a2 2 0 0 1-1.84-1.2L3 13Z" />
+                <path d="M12 13V3.5L5.5 11" />
+                <path d="M12 13V6l6 5" />
+              </svg>
+              <div class="empty-text">
+                <p class="empty-title">No server connected</p>
+                <p class="empty-sub">Connect to browse and transfer remote files.</p>
+              </div>
+              <button class="btn btn-primary" id="connect-btn-2">Connect to a server</button>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <!-- Transfer queue -->
+      <section class="queue" id="queue" hidden>
+        <div class="queue-head">
+          <span>Transfers</span>
+          <button class="btn-link" id="queue-clear" title="Remove finished transfers">Clear finished</button>
+        </div>
+        <div class="queue-list" id="queue-list"></div>
+      </section>
+
+      <!-- Status bar -->
+      <footer class="statusbar">
+        <span id="status-msg">Ready</span>
+      </footer>
+    </div>
+
+    <!-- Site manager -->
+    <div class="modal-backdrop" id="sites-modal" hidden>
+      <div class="modal modal-lg">
+        <h2>Site Manager</h2>
+        <div class="sites-layout">
+          <div class="sites-list-col">
+            <div class="sites-list" id="sites-list"></div>
+            <div class="sites-list-actions">
+              <button type="button" class="btn" id="site-new">New site</button>
+              <button type="button" class="btn" id="site-delete">Delete</button>
+            </div>
+          </div>
+          <div class="sites-form">
+            <label class="field">
+              <span>Name</span>
+              <input id="site-name" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>Protocol</span>
+              <select id="site-protocol">
+                <optgroup label="File transfer">
+                  <option value="sftp">SFTP — SSH File Transfer</option>
+                  <option value="ftps">FTPS — FTP over TLS</option>
+                  <option value="ftp">FTP — plain (insecure)</option>
+                </optgroup>
+                <optgroup label="Cloud storage">
+                  <option value="s3">Amazon S3 (or S3-compatible)</option>
+                  <option value="b2">Backblaze B2</option>
+                  <option value="webdav">WebDAV</option>
+                  <option value="gdrive">Google Drive</option>
+                  <option value="dropbox">Dropbox</option>
+                </optgroup>
+              </select>
+            </label>
+            <div id="site-ftp-fields">
+              <div class="field-row">
+                <label class="field grow">
+                  <span>Host</span>
+                  <input id="site-host" autocomplete="off" placeholder="example.com" />
+                </label>
+                <label class="field port">
+                  <span>Port</span>
+                  <input id="site-port" type="number" min="1" max="65535" />
+                </label>
+              </div>
+              <label class="field">
+                <span>Logon type</span>
+                <select id="site-logon">
+                  <option value="normal">Normal — save username and password</option>
+                  <option value="ask">Ask for password — save username only</option>
+                  <option value="anonymous">Anonymous</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Username</span>
+                <input id="site-user" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Password</span>
+                <input id="site-pass" type="password" autocomplete="off" />
+              </label>
+              <p class="hint" id="site-logon-hint"></p>
+            </div>
+            <div id="cloud-fields" hidden></div>
+            <p class="hint" id="cloud-hint" hidden></p>
+          </div>
+        </div>
+        <p class="form-error" id="sites-error" hidden></p>
+        <div class="modal-actions">
+          <button type="button" class="btn" id="sites-close">Close</button>
+          <button type="button" class="btn" id="site-save">Save</button>
+          <button type="button" class="btn btn-primary" id="site-connect">Connect</button>
+        </div>
+      </div>
+    </div>
+    <!-- Settings -->
+    <div class="modal-backdrop" id="settings-modal" hidden>
+      <div class="modal modal-sm">
+        <h2>Settings</h2>
+        <label class="field">
+          <span>Theme</span>
+          <select id="set-theme">
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
+            <option value="system">Match system</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>When already connected to a server</span>
+          <select id="set-onconnect">
+            <option value="ask">Ask each time</option>
+            <option value="new-tab">Open in a new tab</option>
+            <option value="replace">Replace the current tab</option>
+          </select>
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-primary" id="settings-close">Done</button>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,59 @@
+[package]
+name = "packetboat"
+version = "0.1.0"
+description = "A modern, cross-platform file transfer client (FTP-first, cloud-capable)."
+authors = ["Packetboat contributors"]
+license = "GPL-3.0-or-later"
+edition = "2021"
+
+[lib]
+# The `_lib` suffix keeps the lib name distinct from the binary on Windows.
+# See https://github.com/rust-lang/cargo/issues/8519
+name = "packetboat_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime. Tauri already pulls tokio; we use it directly for fs + net.
+tokio = { version = "1", features = ["full"] }
+# Bridges OpenDAL's futures-io reader/writer to tokio's AsyncRead/AsyncWrite so
+# cloud transfers stream (with live progress) instead of buffering.
+tokio-util = { version = "0.7", features = ["compat"] }
+async-trait = "0.1"
+thiserror = "2"
+dirs = "6"
+
+# SFTP transport. russh is a pure-Rust SSH implementation (no system ssh /
+# libssh2 dependency, which matters on Windows); russh-sftp layers the SFTP
+# subsystem on top of a russh channel.
+russh = "0.61"
+russh-sftp = "2"
+
+# FTP / FTPS transport. Tokio-native async client. FTPS uses rustls with the
+# aws-lc-rs provider (already in the tree via russh, and builds on Windows via
+# the prebuilt-NASM config); suppaftp's native-tls module uses Unix-only
+# std::os::fd and doesn't build on Windows.
+suppaftp = { version = "9", features = ["tokio", "tokio-rustls-aws-lc-rs"] }
+# Mozilla root certificates for FTPS server verification.
+webpki-roots = "0.26"
+
+# OpenDAL — multi-backend layer for cloud storage (S3, B2, WebDAV, …), exposed
+# behind the same StorageBackend trait. Services are reached generically via
+# Operator::via_iter(scheme, config), so adding one is config, not code.
+opendal = { version = "0.57", features = [
+    "services-s3",
+    "services-webdav",
+    "services-b2",
+    "services-gdrive",
+    "services-dropbox",
+] }
+
+# OS keychain for saved-site passwords (Windows Credential Manager / macOS
+# Keychain / Linux Secret Service — the native stores are on by default).
+keyring = "4"
