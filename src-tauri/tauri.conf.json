@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Packetboat",
-  "version": "0.2.0",
-  "identifier": "app.packetboat.desktop",
+  "version": "0.3.0",
+  "identifier": "com.multimediality.packetboat",
   "build": {
     "frontendDist": "../src"
   },

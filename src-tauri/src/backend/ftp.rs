@@ -39,7 +39,7 @@ use suppaftp::tokio_rustls::rustls::{
     ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
 };
 use suppaftp::tokio_rustls::TlsConnector as RustlsTlsConnector;
-use suppaftp::types::FileType;
+use suppaftp::types::{FileType, Mode};
 use suppaftp::{FtpError, FtpResult, Status};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::mpsc;
@@ -96,6 +96,10 @@ pub struct FtpConfig {
     /// first byte, usually port 990).
     #[serde(default = "default_encryption")]
     pub encryption: String,
+    /// Data-connection mode: passive (client connects out — the default, works
+    /// behind NAT) or active (server connects back to the client).
+    #[serde(default = "default_passive")]
+    pub passive: bool,
 }
 
 fn default_port() -> u16 {
@@ -104,6 +108,10 @@ fn default_port() -> u16 {
 
 fn default_encryption() -> String {
     "explicit".to_string()
+}
+
+fn default_passive() -> bool {
+    true
 }
 
 /// A connected FTP control session, plain or TLS-wrapped. The two are distinct
@@ -136,6 +144,24 @@ impl Conn {
         match self {
             Conn::Plain(s) => s.pwd().await,
             Conn::Secure(s) => s.pwd().await,
+        }
+    }
+
+    /// Apply data-connection settings before any transfer: active vs passive
+    /// mode, and the passive NAT workaround — when a server behind NAT advertises
+    /// an unroutable address in its PASV reply, use the control-connection IP
+    /// instead (otherwise the data connection hangs). The workaround is harmless
+    /// in active mode, so it's always on.
+    fn configure(&mut self, mode: Mode) {
+        match self {
+            Conn::Plain(s) => {
+                s.set_mode(mode);
+                s.set_passive_nat_workaround(true);
+            }
+            Conn::Secure(s) => {
+                s.set_mode(mode);
+                s.set_passive_nat_workaround(true);
+            }
         }
     }
 
@@ -586,6 +612,13 @@ async fn establish(config: &FtpConfig, capture: &CertCapture) -> BackendResult<C
             Conn::Secure(secure)
         }
     };
+
+    // Active vs passive data connections (+ the always-on passive NAT workaround).
+    conn.configure(if config.passive {
+        Mode::Passive
+    } else {
+        Mode::Active
+    });
 
     // Blank username means anonymous FTP.
     let user = if config.username.is_empty() {

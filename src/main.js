@@ -36,6 +36,7 @@ function cacheEls() {
   el.setOnConnect = document.getElementById("set-onconnect");
   el.setShowLog = document.getElementById("set-show-log");
   el.setShowQueue = document.getElementById("set-show-queue");
+  el.setCloseToTray = document.getElementById("set-close-to-tray");
   el.setConflictDownload = document.getElementById("set-conflict-download");
   el.setConflictUpload = document.getElementById("set-conflict-upload");
   el.status = document.getElementById("status-msg");
@@ -63,6 +64,8 @@ function cacheEls() {
   el.siteLogonHint = document.getElementById("site-logon-hint");
   el.siteEncryption = document.getElementById("site-encryption");
   el.siteEncryptionField = document.getElementById("site-encryption-field");
+  el.sitePassive = document.getElementById("site-passive");
+  el.siteTransferModeField = document.getElementById("site-transfer-mode-field");
   el.siteFtpFields = document.getElementById("site-ftp-fields");
   el.cloudFields = document.getElementById("cloud-fields");
   el.cloudHint = document.getElementById("cloud-hint");
@@ -747,6 +750,7 @@ async function doConnectWith({
   username,
   password,
   encryption,
+  passive,
   label,
   service,
   config,
@@ -791,7 +795,14 @@ async function doConnectWith({
     } else if (protocol === "sftp") {
       result = await invoke("connect_sftp", { config: { host, port, username, password } });
     } else {
-      const cfg = { host, port, username, password, encryption: ftpEncryption(protocol, encryption) };
+      const cfg = {
+        host,
+        port,
+        username,
+        password,
+        encryption: ftpEncryption(protocol, encryption),
+        passive: passive !== false, // default to passive
+      };
       result = await invoke("connect_ftp", { config: cfg });
       // Untrusted FTPS cert: prompt to trust it (TOFU), then retry the connect.
       if (result.certPrompt) {
@@ -963,8 +974,9 @@ function updateProtocolFields(values) {
   el.siteFtpFields.hidden = cloud;
   el.cloudFields.hidden = !cloud;
   el.cloudHint.hidden = !cloud;
-  // The Encryption select only applies to FTP (not SFTP).
+  // Encryption + transfer mode only apply to FTP (not SFTP).
   el.siteEncryptionField.hidden = proto !== "ftp";
+  el.siteTransferModeField.hidden = proto !== "ftp";
   if (cloud) {
     const def = CLOUD_SERVICES[proto];
     const base =
@@ -1051,6 +1063,8 @@ function fillSiteForm(site) {
   el.siteEncryption.value = site
     ? site.encryption || (site.protocol === "ftps" ? "explicit" : "explicit_optional")
     : "explicit_optional";
+  // Passive by default (new sites and any saved site that predates this field).
+  el.sitePassive.checked = site ? site.passive !== false : true;
   el.siteHost.value = site ? site.host || "" : "";
   el.sitePort.value = site ? site.port || defaultPort(site.protocol, site.encryption) : 22;
   el.siteUser.value = site ? site.username || "" : "";
@@ -1154,6 +1168,7 @@ function readSiteForm() {
     username: el.siteUser.value.trim(),
     logon_type: el.siteLogon.value,
     encryption: protocol === "ftp" ? el.siteEncryption.value : "",
+    passive: protocol === "ftp" ? el.sitePassive.checked : true,
     config: {},
     ...dirs,
   };
@@ -1224,6 +1239,7 @@ async function connectUsing({
   logonType,
   password,
   encryption,
+  passive,
   siteId,
   localDir,
   remoteDir,
@@ -1259,6 +1275,7 @@ async function connectUsing({
     username: user,
     password: pw,
     encryption,
+    passive,
     label: name && name !== host ? `${name} — ${who}` : who,
     localDir,
     remoteDir,
@@ -1317,6 +1334,7 @@ async function connectSite() {
     logonType: form.logon_type,
     password: typed,
     encryption: form.encryption,
+    passive: form.passive,
     siteId: site.id,
     ...dirs,
   });
@@ -1344,6 +1362,7 @@ async function connectFromMenu(site) {
     logonType: site.logon_type,
     password: "",
     encryption: site.encryption,
+    passive: site.passive,
     siteId: site.id,
     ...dirs,
   });
@@ -2123,6 +2142,9 @@ const settings = {
   onConnect: "ask",
   showLog: true,
   showQueue: true,
+  // When on (the default), closing the window hides Packetboat to the system
+  // tray instead of quitting.
+  closeToTray: true,
   // What to do when a transfer's target file already exists. One of:
   // ask | overwrite | newer | size | rename | skip.
   conflictDownload: "ask",
@@ -2137,6 +2159,14 @@ function loadSettings() {
   }
   applyTheme(settings.theme);
   applyPanelVisibility();
+  applyCloseToTray();
+}
+
+// Push the close-to-tray preference to the backend, which owns the window's
+// close behavior. Best-effort (no-op when there's no Tauri backend, e.g. the
+// browser dev preview).
+function applyCloseToTray() {
+  invoke("set_close_to_tray", { enabled: settings.closeToTray }).catch(() => {});
 }
 
 // Show/hide the message log + transfer queue per the saved settings, and keep
@@ -2171,6 +2201,7 @@ function openSettings() {
   el.setOnConnect.value = settings.onConnect;
   el.setShowLog.checked = settings.showLog;
   el.setShowQueue.checked = settings.showQueue;
+  el.setCloseToTray.checked = settings.closeToTray;
   el.setConflictDownload.value = settings.conflictDownload;
   el.setConflictUpload.value = settings.conflictUpload;
   el.settingsModal.hidden = false;
@@ -2325,6 +2356,11 @@ function wireEvents() {
     settings.showQueue = el.setShowQueue.checked;
     saveSettings();
     applyPanelVisibility();
+  });
+  el.setCloseToTray.addEventListener("change", () => {
+    settings.closeToTray = el.setCloseToTray.checked;
+    saveSettings();
+    applyCloseToTray();
   });
   el.setConflictDownload.addEventListener("change", () => {
     settings.conflictDownload = el.setConflictDownload.value;

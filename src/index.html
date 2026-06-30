@@ -232,6 +232,16 @@
                   <option value="plain">Only use plain FTP (insecure)</option>
                 </select>
               </label>
+              <div id="site-transfer-mode-field">
+                <label class="field-toggle">
+                  <span>Passive mode (recommended)</span>
+                  <input type="checkbox" class="switch" id="site-passive" />
+                </label>
+                <p class="hint">
+                  Passive works behind most firewalls. Turn off only for servers that specifically
+                  require active mode.
+                </p>
+              </div>
               <label class="field">
                 <span>Logon type</span>
                 <select id="site-logon">
@@ -312,6 +322,14 @@
           <span>Show transfer queue</span>
           <input type="checkbox" class="switch" id="set-show-queue" />
         </label>
+        <label class="field-toggle">
+          <span>Close to system tray</span>
+          <input type="checkbox" class="switch" id="set-close-to-tray" />
+        </label>
+        <p class="hint">
+          When on, closing the window keeps Packetboat running in the system tray
+          instead of quitting. Reopen it from the tray icon.
+        </p>
         <label class="field">
           <span>When a download's target file exists</span>
           <select id="set-conflict-download">

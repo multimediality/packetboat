@@ -1,6 +1,6 @@
 [package]
 name = "packetboat"
-version = "0.2.0"
+version = "0.3.0"
 description = "A modern, cross-platform file transfer client (FTP-first, cloud-capable)."
 authors = ["Packetboat contributors"]
 license = "GPL-3.0-or-later"
@@ -16,9 +16,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# tray-icon: system tray + close-to-tray. image-png: decode the tray PNG icon.
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 # Native folder picker for the "Default local directory" Browse button.
 tauri-plugin-dialog = "2"
+# Persist window size/position/maximized across launches.
+tauri-plugin-window-state = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

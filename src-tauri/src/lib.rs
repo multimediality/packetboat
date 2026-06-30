@@ -5,7 +5,7 @@ mod backend;
 mod transfer;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use backend::cloud::OpendalBackend;
@@ -39,6 +39,9 @@ struct Site {
     /// non-FTP protocols.
     #[serde(default)]
     encryption: String,
+    /// FTP data-connection mode: passive (default, NAT-friendly) or active.
+    #[serde(default = "default_true")]
+    passive: bool,
     /// Cloud-backend (OpenDAL) settings — non-secret config keys only (bucket,
     /// region, endpoint, …). Secret keys live in the OS keychain, like
     /// passwords. Empty for FTP/SFTP sites.
@@ -57,6 +60,10 @@ struct Site {
 
 fn default_logon_type() -> String {
     "ask".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// App-wide state: every live remote connection (keyed by id — one per tab)
@@ -401,15 +408,18 @@ async fn remote_rename(
 
 // ---- Site manager: persistence (JSON config file) ----
 
-fn sites_file(app: &AppHandle) -> BackendResult<std::path::PathBuf> {
+fn sites_file() -> BackendResult<std::path::PathBuf> {
     let dir = backend::config_dir();
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("sites.json");
-    // One-time migration: earlier builds stored sites.json in Tauri's
-    // identifier folder (…/app.packetboat.desktop). If the new file doesn't
-    // exist yet but the old one does, carry it over so saved sites aren't lost.
+    // One-time migration: the earliest builds stored sites.json in Tauri's
+    // identifier folder, which was the placeholder `app.packetboat.desktop`
+    // (a literal historical path — unaffected by later identifier changes). If
+    // the new file doesn't exist yet but that old one does, carry it over.
     if !path.exists() {
-        if let Ok(old) = app.path().app_config_dir().map(|d| d.join("sites.json")) {
+        if let Some(old) =
+            dirs::config_dir().map(|d| d.join("app.packetboat.desktop").join("sites.json"))
+        {
             if old.exists() {
                 let _ = std::fs::copy(&old, &path);
             }
@@ -419,17 +429,17 @@ fn sites_file(app: &AppHandle) -> BackendResult<std::path::PathBuf> {
 }
 
 #[tauri::command]
-fn sites_load(app: AppHandle) -> BackendResult<Vec<Site>> {
-    match std::fs::read(sites_file(&app)?) {
+fn sites_load() -> BackendResult<Vec<Site>> {
+    match std::fs::read(sites_file()?) {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_default()),
         Err(_) => Ok(Vec::new()),
     }
 }
 
 #[tauri::command]
-fn sites_save(app: AppHandle, sites: Vec<Site>) -> BackendResult<()> {
+fn sites_save(sites: Vec<Site>) -> BackendResult<()> {
     let json = serde_json::to_vec_pretty(&sites).map_err(|e| BackendError::Other(e.to_string()))?;
-    std::fs::write(sites_file(&app)?, json)?;
+    std::fs::write(sites_file()?, json)?;
     Ok(())
 }
 
@@ -471,85 +481,81 @@ fn is_dev() -> bool {
     cfg!(debug_assertions)
 }
 
-/// Persisted window geometry, stored in the Packetboat config dir.
-#[derive(Serialize, Deserialize)]
-struct WindowState {
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    maximized: bool,
+/// Whether closing the window hides it to the system tray instead of quitting.
+/// Set from the frontend setting via [`set_close_to_tray`] and read in the
+/// window's close handler. A module-level flag so the close closure can read it
+/// without threading app state through.
+static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(true);
+
+/// Update the close-to-tray preference (called by the frontend on startup and
+/// whenever the Settings toggle changes).
+#[tauri::command]
+fn set_close_to_tray(enabled: bool) {
+    CLOSE_TO_TRAY.store(enabled, Ordering::Relaxed);
 }
 
-fn window_state_path() -> std::path::PathBuf {
-    backend::config_dir().join("window-state.json")
-}
-
-/// Apply the saved geometry on launch: size always; position only if it still
-/// lands on a connected monitor (so a window saved on a since-disconnected
-/// display doesn't reopen off-screen).
-fn restore_window_state(window: &tauri::WebviewWindow) {
-    let Ok(text) = std::fs::read_to_string(window_state_path()) else {
-        return;
-    };
-    let Ok(state) = serde_json::from_str::<WindowState>(&text) else {
-        return;
-    };
-    if state.width == 0 || state.height == 0 {
-        return;
-    }
-    let _ = window.set_size(tauri::PhysicalSize::new(state.width, state.height));
-    if window_on_screen(window, &state) {
-        let _ = window.set_position(tauri::PhysicalPosition::new(state.x, state.y));
-    }
-    if state.maximized {
-        let _ = window.maximize();
+/// Show, unminimize, and focus the main window (tray "Open" / left-click).
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
     }
 }
 
-/// Whether the saved window rectangle intersects any connected monitor.
-fn window_on_screen(window: &tauri::WebviewWindow, state: &WindowState) -> bool {
-    let monitors = match window.available_monitors() {
-        Ok(m) if !m.is_empty() => m,
-        _ => return true, // can't enumerate — trust the saved position
-    };
-    let (l, t, r, b) = (
-        state.x,
-        state.y,
-        state.x + state.width as i32,
-        state.y + state.height as i32,
-    );
-    monitors.iter().any(|m| {
-        let p = m.position();
-        let s = m.size();
-        let (ml, mt, mr, mb) = (p.x, p.y, p.x + s.width as i32, p.y + s.height as i32);
-        l < mr && r > ml && t < mb && b > mt
-    })
-}
+/// Build the system tray icon and its menu (Open / Quit).
+fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::menu::MenuBuilder;
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-/// Save the current window geometry (called on close).
-fn save_window_state(window: &tauri::WebviewWindow) {
-    let maximized = window.is_maximized().unwrap_or(false);
-    let (Ok(pos), Ok(size)) = (window.outer_position(), window.inner_size()) else {
-        return;
-    };
-    let state = WindowState {
-        x: pos.x,
-        y: pos.y,
-        width: size.width,
-        height: size.height,
-        maximized,
-    };
-    let _ = std::fs::create_dir_all(backend::config_dir());
-    if let Ok(json) = serde_json::to_string_pretty(&state) {
-        let _ = std::fs::write(window_state_path(), json);
-    }
+    let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
+    let menu = MenuBuilder::new(app)
+        .text("open", "Open Packetboat")
+        .separator()
+        .text("quit", "Quit")
+        .build()?;
+
+    TrayIconBuilder::with_id("packetboat_tray")
+        .icon(icon)
+        .tooltip("Packetboat")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open" => show_main_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            // Left-click the tray icon to restore the window.
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Persist window size/position/maximized across launches. VISIBLE is
+        // excluded so close-to-tray's hide() doesn't persist a "hidden" state
+        // and launch the app invisibly next time. (The plugin stores its file in
+        // the Tauri identifier folder, not the Packetboat config dir.)
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        & !tauri_plugin_window_state::StateFlags::VISIBLE,
+                )
+                .build(),
+        )
         .setup(|app| {
             let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
             let transfers = TransferManager::start(app.handle().clone(), connections.clone());
@@ -558,16 +564,18 @@ pub fn run() {
                 next_id: AtomicU32::new(1),
                 transfers,
             });
-            // Restore the window's last size/position/maximized state, and save
-            // it on close. Kept in-app (not the window-state plugin) so all
-            // config lives in one Packetboat folder rather than the Tauri
-            // identifier folder the plugin is hard-wired to.
+            setup_tray(app.handle())?;
+            // Close-to-tray: when the setting is on, the window's X button hides
+            // to the tray instead of quitting. Window geometry is persisted by
+            // the window-state plugin above.
             if let Some(window) = app.get_webview_window("main") {
-                restore_window_state(&window);
-                let saved = window.clone();
+                let win = window.clone();
                 window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { .. } = event {
-                        save_window_state(&saved);
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        if CLOSE_TO_TRAY.load(Ordering::Relaxed) {
+                            api.prevent_close();
+                            let _ = win.hide();
+                        }
                     }
                 });
             }
@@ -598,6 +606,7 @@ pub fn run() {
             sites_save,
             app_version,
             is_dev,
+            set_close_to_tray,
             secret_set,
             secret_get,
             secret_delete,

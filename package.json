@@ -1,7 +1,7 @@
 {
   "name": "packetboat",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A modern, cross-platform file transfer client (FTP-first, cloud-capable).",
   "license": "GPL-3.0-or-later",
   "type": "module",
