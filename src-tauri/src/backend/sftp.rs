@@ -7,8 +7,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use russh::client::{self, AuthResult, Handle, KeyboardInteractiveAuthResponse};
 use russh_sftp::client::SftpSession;
+use russh_sftp::protocol::OpenFlags;
 use serde::Deserialize;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncSeekExt, AsyncWrite};
 use tokio::sync::Mutex;
 
 use super::{BackendError, BackendKind, BackendResult, Entry, EntryKind, StorageBackend};
@@ -122,6 +123,26 @@ impl StorageBackend for SftpBackend {
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn AsyncWrite + Send + Unpin>> {
         let sftp = self.sftp.lock().await;
         Ok(Box::new(sftp.create(path.to_string()).await?))
+    }
+
+    async fn open_read_at(
+        &self,
+        path: &str,
+        offset: u64,
+    ) -> BackendResult<Box<dyn AsyncRead + Send + Unpin>> {
+        // SFTP is random-access: open then seek to the resume offset.
+        let sftp = self.sftp.lock().await;
+        let mut file = sftp.open_with_flags(path.to_string(), OpenFlags::READ).await?;
+        file.seek(std::io::SeekFrom::Start(offset)).await?;
+        Ok(Box::new(file))
+    }
+
+    async fn open_append(&self, path: &str) -> BackendResult<Box<dyn AsyncWrite + Send + Unpin>> {
+        let sftp = self.sftp.lock().await;
+        let file = sftp
+            .open_with_flags(path.to_string(), OpenFlags::WRITE | OpenFlags::APPEND)
+            .await?;
+        Ok(Box::new(file))
     }
 
     async fn read_file(&self, path: &str) -> BackendResult<Vec<u8>> {
@@ -249,10 +270,7 @@ impl client::Handler for ClientHandler {
 
 /// Path to the JSON known_hosts file in the app config dir.
 fn known_hosts_path() -> std::path::PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("packetboat")
-        .join("known_hosts.json")
+    super::config_dir().join("known_hosts.json")
 }
 
 fn load_known_hosts(path: &std::path::Path) -> std::collections::HashMap<String, String> {

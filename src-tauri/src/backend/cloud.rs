@@ -17,7 +17,7 @@ use opendal::Operator;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::compat::{FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 
-use super::{BackendKind, BackendResult, Entry, EntryKind, StorageBackend};
+use super::{BackendError, BackendKind, BackendResult, Entry, EntryKind, StorageBackend};
 
 pub struct OpendalBackend {
     op: Operator,
@@ -94,6 +94,25 @@ impl StorageBackend for OpendalBackend {
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn AsyncWrite + Send + Unpin>> {
         let writer = self.op.writer(&to_file(path)).await?;
         Ok(Box::new(writer.into_futures_async_write().compat_write()))
+    }
+
+    async fn open_read_at(
+        &self,
+        path: &str,
+        offset: u64,
+    ) -> BackendResult<Box<dyn AsyncRead + Send + Unpin>> {
+        let reader = self.op.reader(&to_file(path)).await?;
+        let stream = reader.into_futures_async_read(offset..).await?;
+        Ok(Box::new(stream.compat()))
+    }
+
+    async fn open_append(&self, _path: &str) -> BackendResult<Box<dyn AsyncWrite + Send + Unpin>> {
+        // Object stores are immutable — there's no append, so a resumed upload
+        // would have to re-send the whole object. The UI doesn't offer Resume
+        // for cloud uploads; this guards the path if it's reached anyway.
+        Err(BackendError::Other(
+            "resuming uploads isn't supported for cloud storage".into(),
+        ))
     }
 
     async fn read_file(&self, path: &str) -> BackendResult<Vec<u8>> {

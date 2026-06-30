@@ -42,7 +42,7 @@
             </svg>
             <div class="brand-text">
               <span class="brand-name"><span class="wm-1">Packet</span><span class="wm-2">boat</span></span>
-              <span class="brand-tag">file transfer</span>
+              <span class="brand-tag">file transfer<span class="brand-version" id="app-version"></span></span>
             </div>
           </div>
           <div class="toolbar">
@@ -144,10 +144,13 @@
             </div>
             <div class="list-body" id="body-remote"></div>
             <div class="pane-empty" id="empty-remote">
-              <svg class="empty-mark" width="40" height="40" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M3 13h18l-2.2 5.2a2 2 0 0 1-1.84 1.2H7.04a2 2 0 0 1-1.84-1.2L3 13Z" />
-                <path d="M12 13V3.5L5.5 11" />
-                <path d="M12 13V6l6 5" />
+              <svg class="empty-mark" width="58" height="48" viewBox="0 0 92 76" aria-hidden="true">
+                <polygon points="41 58 41 0 46 0 46 58 92 58 80 76 12 76 0 58 41 58" />
+                <polygon points="39 3 39 55 4 55 39 3" />
+                <rect x="53" y="28" width="15" height="15" />
+                <rect x="68" y="43" width="15" height="15" />
+                <rect x="68" y="28" width="15" height="15" />
+                <rect x="53" y="43" width="15" height="15" />
               </svg>
               <div class="empty-text">
                 <p class="empty-title">No server connected</p>
@@ -162,10 +165,14 @@
       <!-- Transfer queue -->
       <section class="queue" id="queue" hidden>
         <div class="queue-head">
-          <span>Transfers</span>
-          <button class="btn-link" id="queue-clear" title="Remove finished transfers">Clear finished</button>
+          <div class="queue-tabs">
+            <button class="q-tab active" data-tab="active">Queued <span class="q-count" id="count-active">0</span></button>
+            <button class="q-tab" data-tab="failed">Failed <span class="q-count" id="count-failed">0</span></button>
+            <button class="q-tab" data-tab="success">Successful <span class="q-count" id="count-success">0</span></button>
+          </div>
+          <button class="btn-link" id="queue-clear" title="Remove finished and failed transfers">Clear finished</button>
         </div>
-        <div class="queue-list" id="queue-list"></div>
+        <div class="queue-list" id="queue-list" data-tab="active"></div>
       </section>
 
       <!-- Status bar -->
@@ -196,15 +203,12 @@
               <select id="site-protocol">
                 <optgroup label="File transfer">
                   <option value="sftp">SFTP — SSH File Transfer</option>
-                  <option value="ftps">FTPS — FTP over TLS</option>
-                  <option value="ftp">FTP — plain (insecure)</option>
+                  <option value="ftp">FTP — File Transfer Protocol</option>
                 </optgroup>
                 <optgroup label="Cloud storage">
                   <option value="s3">Amazon S3 (or S3-compatible)</option>
                   <option value="b2">Backblaze B2</option>
                   <option value="webdav">WebDAV</option>
-                  <option value="gdrive">Google Drive</option>
-                  <option value="dropbox">Dropbox</option>
                 </optgroup>
               </select>
             </label>
@@ -219,6 +223,15 @@
                   <input id="site-port" type="number" min="1" max="65535" />
                 </label>
               </div>
+              <label class="field" id="site-encryption-field">
+                <span>Encryption</span>
+                <select id="site-encryption">
+                  <option value="explicit_optional">Use explicit FTP over TLS if available</option>
+                  <option value="explicit">Require explicit FTP over TLS</option>
+                  <option value="implicit">Require implicit FTP over TLS</option>
+                  <option value="plain">Only use plain FTP (insecure)</option>
+                </select>
+              </label>
               <label class="field">
                 <span>Logon type</span>
                 <select id="site-logon">
@@ -239,6 +252,28 @@
             </div>
             <div id="cloud-fields" hidden></div>
             <p class="hint" id="cloud-hint" hidden></p>
+            <!-- Applies to every protocol: where each pane opens on connect. -->
+            <label class="field">
+              <span>Default local directory (optional)</span>
+              <div class="dir-input">
+                <input id="site-local-dir" autocomplete="off" spellcheck="false"
+                  placeholder="leave blank to keep the current folder" />
+                <button type="button" class="btn" id="site-local-browse">Browse…</button>
+              </div>
+            </label>
+            <label class="field">
+              <span>Default remote directory (optional)</span>
+              <input id="site-remote-dir" autocomplete="off" spellcheck="false"
+                placeholder="server default" />
+            </label>
+            <label class="field-toggle">
+              <span>Use synchronized browsing</span>
+              <input type="checkbox" class="switch" id="site-sync" />
+            </label>
+            <p class="hint">
+              Mirrors navigation between the two default directories above — open a
+              folder on one side and the other follows.
+            </p>
           </div>
         </div>
         <p class="form-error" id="sites-error" hidden></p>
@@ -267,6 +302,38 @@
             <option value="ask">Ask each time</option>
             <option value="new-tab">Open in a new tab</option>
             <option value="replace">Replace the current tab</option>
+          </select>
+        </label>
+        <label class="field-toggle">
+          <span>Show message log</span>
+          <input type="checkbox" class="switch" id="set-show-log" />
+        </label>
+        <label class="field-toggle">
+          <span>Show transfer queue</span>
+          <input type="checkbox" class="switch" id="set-show-queue" />
+        </label>
+        <label class="field">
+          <span>When a download's target file exists</span>
+          <select id="set-conflict-download">
+            <option value="ask">Ask each time</option>
+            <option value="overwrite">Overwrite</option>
+            <option value="newer">Overwrite if source is newer</option>
+            <option value="size">Overwrite if size differs</option>
+            <option value="resume">Resume the transfer</option>
+            <option value="rename">Rename (keep both)</option>
+            <option value="skip">Skip</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>When an upload's target file exists</span>
+          <select id="set-conflict-upload">
+            <option value="ask">Ask each time</option>
+            <option value="overwrite">Overwrite</option>
+            <option value="newer">Overwrite if source is newer</option>
+            <option value="size">Overwrite if size differs</option>
+            <option value="resume">Resume the transfer</option>
+            <option value="rename">Rename (keep both)</option>
+            <option value="skip">Skip</option>
           </select>
         </label>
         <div class="modal-actions">

@@ -4,7 +4,7 @@
 use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncSeekExt, AsyncWrite};
 
 use super::{BackendKind, BackendResult, Entry, EntryKind, StorageBackend};
 
@@ -60,6 +60,25 @@ impl StorageBackend for LocalBackend {
 
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn AsyncWrite + Send + Unpin>> {
         Ok(Box::new(tokio::fs::File::create(path).await?))
+    }
+
+    async fn open_read_at(
+        &self,
+        path: &str,
+        offset: u64,
+    ) -> BackendResult<Box<dyn AsyncRead + Send + Unpin>> {
+        let mut file = tokio::fs::File::open(path).await?;
+        file.seek(std::io::SeekFrom::Start(offset)).await?;
+        Ok(Box::new(file))
+    }
+
+    async fn open_append(&self, path: &str) -> BackendResult<Box<dyn AsyncWrite + Send + Unpin>> {
+        let file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+            .await?;
+        Ok(Box::new(file))
     }
 
     async fn read_file(&self, path: &str) -> BackendResult<Vec<u8>> {

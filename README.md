@@ -1,27 +1,35 @@
 # Packetboat
 
-A modern, cross-platform file-transfer client — FTP-first, cloud-capable. Think
-FileZilla or Cyberduck, but clean, dark by default, and free of adware.
+A modern, cross-platform file-transfer client — FTP-first, cloud-capable. A
+clean dual-pane client, dark by default and free of adware.
 
-> **Status:** working desktop app. SFTP, FTP/FTPS, and cloud backends (S3,
-> Backblaze B2, WebDAV, Google Drive, Dropbox) all run behind one storage
-> abstraction. SFTP is confirmed against a live server and B2 against a live
-> bucket; the other backends are wired and locally verified but not yet
-> exercised against every provider.
+> **Status:** working desktop app. SFTP, FTP/FTPS, and cloud backends (S3 &
+> S3-compatible, Backblaze B2, WebDAV) all run behind one storage abstraction.
+> SFTP and FTP/FTPS are confirmed against live servers and B2 against a live
+> bucket; S3 and WebDAV are wired and locally verified but not yet exercised
+> against every provider.
 
 ## Features
 
 - **Protocols** — SFTP ([`russh`]), FTP/FTPS ([`suppaftp`] + rustls), and cloud
-  storage via [Apache OpenDAL] (S3 & S3-compatible, Backblaze B2, WebDAV, Google
-  Drive, Dropbox). Every protocol speaks the same [`StorageBackend`] trait, so
-  adding a service is configuration, not new plumbing.
+  storage via [Apache OpenDAL] (S3 & S3-compatible, Backblaze B2, WebDAV). Every
+  protocol speaks the same [`StorageBackend`] trait, so adding a service is
+  configuration, not new plumbing.
+- **FTP security** — selectable encryption per site (require explicit TLS,
+  opportunistic, implicit, or plain) plus a trust-on-first-use prompt for unknown
+  or mismatched server certificates, with change detection.
 - **Dual-pane browser** — local ⇄ remote, each with a folder tree and a file
-  list. Tabbed, so several remote connections can be open at once.
+  list. Tabbed, so several remote connections can be open at once. Optional
+  **synchronized browsing** mirrors navigation between the two panes.
 - **Transfers** — a queue that **streams** with live per-file progress (no
   whole-file buffering). Drag-and-drop between panes, onto folders, and from
-  Explorer; **whole folders transfer recursively**.
+  Explorer; **whole folders transfer recursively**. Interrupted transfers can
+  **resume** (SFTP and FTP both ways, plus cloud downloads).
+- **Conflict handling** — when a file already exists, overwrite, keep the
+  newer / larger, resume, auto-rename, or skip — per transfer or as a saved
+  default for uploads and downloads.
 - **Connections** — a Quick Connect bar plus a Site Manager with saved sites,
-  FileZilla-style logon types, and per-service cloud config. Passwords and cloud
+  per-site logon types, and per-service cloud config. Passwords and cloud
   secrets live in the OS keychain (Windows Credential Manager / macOS Keychain /
   Secret Service) — never the site file.
 - **Chrome** — message log, transfer queue, SFTP host-key verification
@@ -56,7 +64,7 @@ src-tauri/
   src/backend/local.rs   Local filesystem backend
   src/backend/sftp.rs    SFTP (russh + russh-sftp)
   src/backend/ftp.rs     FTP / FTPS (suppaftp + rustls)
-  src/backend/cloud.rs   Cloud via OpenDAL (S3, B2, WebDAV, Drive, Dropbox)
+  src/backend/cloud.rs   Cloud via OpenDAL (S3, B2, WebDAV)
   icons/                 App icon set
   .cargo/config.toml     Windows: prebuilt NASM for the crypto backend
 ```
@@ -85,6 +93,14 @@ npm run dev        # tauri dev — launches the app with the Rust backend
 ```sh
 npm run build      # tauri build — produces a native installer
 ```
+
+## Releases
+
+Pushing a version tag (e.g. `v0.1.0`) triggers the
+[release workflow](.github/workflows/release.yml), which builds and uploads
+installers for Windows, macOS (Intel + Apple Silicon), and Linux to a draft
+GitHub release. Bump the version in `package.json`, `src-tauri/tauri.conf.json`,
+and `src-tauri/Cargo.toml` before tagging.
 
 ## License
 

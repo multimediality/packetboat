@@ -16,6 +16,16 @@ pub mod ftp;
 pub mod local;
 pub mod sftp;
 
+/// The app's config directory, capitalized for a tidy Windows folder name:
+/// `%APPDATA%\Packetboat` (Windows), `~/Library/Application Support/Packetboat`
+/// (macOS), `~/.config/Packetboat` (Linux). All persisted config — saved sites,
+/// SSH known-hosts, FTPS trusted certs — lives here.
+pub fn config_dir() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("Packetboat")
+}
+
 /// A single entry in a directory listing. Shared by every backend and sent
 /// straight to the frontend as JSON.
 #[derive(Debug, Clone, Serialize)]
@@ -75,6 +85,19 @@ pub trait StorageBackend: Send + Sync {
 
     /// Open `path` for streaming writes, creating or truncating it.
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn AsyncWrite + Send + Unpin>>;
+
+    /// Open `path` for reading starting at byte `offset` — used to resume a
+    /// partially-completed transfer.
+    async fn open_read_at(
+        &self,
+        path: &str,
+        offset: u64,
+    ) -> BackendResult<Box<dyn AsyncRead + Send + Unpin>>;
+
+    /// Open `path` for appending: writes continue after the existing content
+    /// (the other half of a resumed transfer). Backends that can't append —
+    /// object stores like S3/B2 — return an error.
+    async fn open_append(&self, path: &str) -> BackendResult<Box<dyn AsyncWrite + Send + Unpin>>;
 
     /// Read an entire file into memory. Convenience for small files; the
     /// transfer engine uses the streaming handles above instead.

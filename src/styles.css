@@ -43,6 +43,12 @@
   box-sizing: border-box;
 }
 
+/* The hidden attribute must always hide, even when an element has a higher-
+   specificity display rule (e.g. #site-ftp-fields { display: flex }). */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -62,14 +68,51 @@ body {
   grid-template-rows: auto auto auto auto 1fr auto auto;
 }
 
+/* Pin each region to its row. Otherwise, toggling the log panel and/or queue
+   off (display:none) makes the remaining children auto-shift up into the wrong
+   tracks — the panes' 1fr lands on the status-bar row and pushes it off-screen
+   (clipped behind the taskbar). With explicit rows, a hidden region just leaves
+   an empty, collapsed track. */
+.appbar {
+  grid-row: 1;
+}
+.quickbar {
+  grid-row: 2;
+}
+.logpanel {
+  grid-row: 3;
+}
+.tab-bar {
+  grid-row: 4;
+}
+.panes {
+  grid-row: 5;
+}
+.queue {
+  grid-row: 6;
+}
+.statusbar {
+  grid-row: 7;
+}
+
 /* ---------- App bar ---------- */
 .appbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  row-gap: 10px;
   padding: 10px 16px;
   background: var(--pb-bg);
   border-bottom: 1px solid var(--border);
+}
+
+/* The brand+tools and the connection cluster keep their size and wrap as units
+   rather than squishing; when they no longer fit side by side, the connection
+   info + Site Manager + Disconnect drop to their own row, right-aligned. */
+.appbar-left,
+.conn {
+  flex-shrink: 0;
 }
 
 .brand {
@@ -127,10 +170,25 @@ body {
   letter-spacing: 1.4px;
 }
 
+/* App version next to the tagline — accent-coloured, monospace, not uppercased. */
+.brand-version {
+  margin-left: 8px;
+  font-family: var(--pb-font-data);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--accent);
+}
+.brand-version:empty {
+  margin-left: 0;
+}
+
 .appbar-left {
   display: flex;
   align-items: center;
   gap: 18px;
+  padding-right: 15px;
 }
 
 /* ---------- Connection tabs ---------- */
@@ -248,6 +306,24 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
+  margin-left: auto;
+}
+
+/* When the connection cluster wraps to its own row (toggled in JS), it spans
+   the full width with the site label pinned left and the buttons grouped right.
+   Inline it stays a compact right-aligned cluster. */
+.conn.stacked {
+  flex-basis: 100%;
+  margin-left: 0;
+}
+.conn.stacked .sites-btn-group {
+  margin-left: auto;
+}
+
+/* Bound + break the connection label so a long site/host string wraps within
+   the cluster instead of overflowing (and so it drives the row wrap sooner). */
+.conn-label {
+  overflow-wrap: anywhere;
 }
 
 .conn-status {
@@ -348,15 +424,141 @@ select {
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 
-input:focus,
+/* Text-like inputs get a focus glow; radios and checkboxes (round/native
+   controls) shouldn't — the glow looks wrong boxed around them. */
+input:not([type="radio"]):not([type="checkbox"]):focus,
 select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
 }
 
+/* Replace the native dropdown arrow with a themed chevron inset from the right
+   so it mirrors the left text padding (the native one sits flush to the edge). */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 30px;
+}
+
+/* The chevron longhands are scoped to [data-theme] so they out-specify
+   components.css's `.field select` / `.quickbar select` `background` shorthand,
+   which (being more specific + loaded later) would otherwise wipe them. */
+:root[data-theme="dark"] select,
+:root[data-theme="light"] select {
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+  background-size: 12px;
+}
+:root[data-theme="dark"] select {
+  background-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%239DB2C3' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><path d='M2.5 4.5 6 8 9.5 4.5'/></svg>");
+}
+:root[data-theme="light"] select {
+  background-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%2341586B' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><path d='M2.5 4.5 6 8 9.5 4.5'/></svg>");
+}
+
 input:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+/* Plain checkboxes (e.g. "Always do this") shouldn't pick up the text-input
+   padding/border/background. */
+input[type="checkbox"]:not(.switch) {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* Custom radio: a native (appearance:auto) radio draws its own focus ring in
+   WebView2 that `outline:none` can't suppress, so we render it ourselves — a
+   themed circle with an accent dot when checked, and no focus glow. */
+input[type="radio"] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 2px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+input[type="radio"]:checked {
+  border-color: var(--accent);
+  background: radial-gradient(circle at center, var(--accent) 0 3px, transparent 3.5px);
+}
+
+input[type="radio"]:focus,
+input[type="radio"]:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+/* Settings rows with a label on the left and a toggle switch on the right. */
+.field-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.field-toggle > span {
+  font-size: 13px;
+  color: var(--text);
+}
+
+/* Toggle switch (a checkbox restyled as a pill + thumb). */
+input.switch {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 40px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface-3);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+input.switch::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 0.15s, background 0.15s;
+}
+
+input.switch:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+input.switch:checked::before {
+  transform: translateX(18px);
+  background: var(--on-accent);
+}
+
+input.switch:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--pb-focus-ring);
 }
 
 /* Hide the native number spinners — they don't match the theme and let you
@@ -629,12 +831,12 @@ input[type="number"]::-webkit-inner-spin-button {
   display: none;
 }
 
-.empty-mark {
-  fill: none;
-  stroke: var(--border-strong);
-  stroke-width: 1.6;
-  stroke-linejoin: round;
-  stroke-linecap: round;
+/* The brand sloop, filled as a muted placeholder. Scoped to .pane-empty so it
+   out-specifies components.css's stroked `.empty-mark` rule. */
+.pane-empty .empty-mark {
+  fill: var(--muted);
+  stroke: none;
+  opacity: 0.85;
 }
 
 .empty-text {
@@ -684,7 +886,9 @@ input[type="number"]::-webkit-inner-spin-button {
 .logpanel {
   display: flex;
   flex-direction: column;
-  max-height: 150px;
+  /* Fixed (not max) height so the panel stays a constant size as it fills —
+     entries scroll within it rather than growing the panel. */
+  height: 150px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
@@ -706,6 +910,8 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 
 .log-list {
+  flex: 1;
+  min-height: 0;
   background: var(--pb-bg);
   overflow-y: auto;
   padding: 4px 0;
@@ -713,6 +919,11 @@ input[type="number"]::-webkit-inner-spin-button {
   font-family: var(--pb-font-data);
   font-size: 12px;
   line-height: 1.55;
+  /* The app disables selection globally; re-enable it here so log lines
+     (errors, paths) can be selected and copied. */
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
 }
 
 .log-entry {
@@ -853,7 +1064,8 @@ input[type="number"]::-webkit-inner-spin-button {
 .queue {
   display: flex;
   flex-direction: column;
-  max-height: 200px;
+  /* Fixed height so the queue stays a constant size as rows fill (they scroll). */
+  height: 200px;
   background: var(--surface-2);
   border-top: 1px solid var(--border);
 }
@@ -864,14 +1076,55 @@ input[type="number"]::-webkit-inner-spin-button {
 
 .queue-head {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   justify-content: space-between;
-  padding: 7px 14px;
+  padding: 0 12px 0 0;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Queued / Failed / Successful tabs. */
+.queue-tabs {
+  display: flex;
+}
+
+.q-tab {
+  appearance: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  font: inherit;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 1px;
+  padding: 7px 14px;
+  cursor: pointer;
+}
+
+.q-tab:hover {
+  color: var(--text);
+}
+
+.q-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.q-count {
+  display: inline-block;
+  min-width: 16px;
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--surface-3);
   color: var(--muted);
-  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  text-align: center;
+}
+
+.q-tab.active .q-count {
+  background: var(--accent);
+  color: var(--on-accent);
 }
 
 .btn-link {
@@ -890,6 +1143,8 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 
 .queue-list {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 4px 0;
   background: var(--pb-bg);
@@ -897,11 +1152,49 @@ input[type="number"]::-webkit-inner-spin-button {
 
 .q-row {
   display: grid;
-  grid-template-columns: 18px 1fr 160px 116px;
+  grid-template-columns: 16px 1fr 80px 120px 96px 52px;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   padding: 6px 14px;
   font-size: 13px;
+}
+
+.q-size {
+  text-align: right;
+  font-size: 12px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.q-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.q-act {
+  appearance: none;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--muted);
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.q-act:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.q-cancel:hover {
+  color: var(--danger);
 }
 
 .q-dir {
@@ -938,22 +1231,34 @@ input[type="number"]::-webkit-inner-spin-button {
   font-variant-numeric: tabular-nums;
 }
 
-.q-row.done .q-fill {
+.q-row[data-status="success"] .q-fill {
   background: var(--ok);
 }
 
-.q-row.done .q-stat {
+.q-row[data-status="success"] .q-stat {
   color: var(--ok);
 }
 
-.q-row.error .q-fill {
+/* Skipped files sit in the Successful tab but read as muted, not "done" green. */
+.q-row.q-skipped .q-stat {
+  color: var(--muted);
+}
+
+.q-row[data-status="failed"] .q-fill {
   width: 100%;
   background: var(--danger);
 }
 
-.q-row.error .q-stat {
+.q-row[data-status="failed"] .q-stat {
   color: var(--danger);
   cursor: help;
+}
+
+/* Each tab shows only its own rows. */
+.queue-list[data-tab="active"] .q-row:not([data-status="active"]),
+.queue-list[data-tab="failed"] .q-row:not([data-status="failed"]),
+.queue-list[data-tab="success"] .q-row:not([data-status="success"]) {
+  display: none;
 }
 
 .list-body::-webkit-scrollbar,
@@ -1023,6 +1328,43 @@ input[type="number"]::-webkit-inner-spin-button {
   width: 100%;
 }
 
+/* FTPS certificate trust prompt. */
+.dialog-warn {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(248, 81, 73, 0.12);
+  border: 1px solid var(--danger);
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.cert-details {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 14px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.cert-details dt {
+  color: var(--faint);
+  text-align: right;
+}
+
+.cert-details dd {
+  margin: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.cert-fp {
+  font-family: var(--pb-font-data, monospace);
+  font-size: 12px;
+}
+
 /* ---------- Quick connect bar ---------- */
 .quickbar {
   display: flex;
@@ -1037,6 +1379,11 @@ input[type="number"]::-webkit-inner-spin-button {
 .quickbar select {
   padding: 6px 9px;
   font-size: 13px;
+}
+
+/* Keep room for the custom chevron (the shorthand above resets padding-right). */
+.quickbar select {
+  padding-right: 28px;
 }
 
 .quickbar .qc-proto {
@@ -1177,6 +1524,28 @@ input[type="number"]::-webkit-inner-spin-button {
   min-width: 0;
 }
 
+#site-ftp-fields,
+#cloud-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Default-local-directory field: input + Browse button on one row. */
+.dir-input {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.dir-input input {
+  flex: 1;
+  min-width: 0;
+}
+.dir-input .btn {
+  flex: none;
+  white-space: nowrap;
+}
+
 .check {
   display: flex;
   align-items: center;
@@ -1186,7 +1555,7 @@ input[type="number"]::-webkit-inner-spin-button {
   cursor: pointer;
 }
 
-.check input {
+.check input:not(.switch) {
   width: auto;
 }
 
@@ -1198,12 +1567,55 @@ input[type="number"]::-webkit-inner-spin-button {
   cursor: pointer;
 }
 
-.radio input {
-  width: auto;
+/* ---------- File-exists conflict prompt ---------- */
+.modal-conflict {
+  width: 480px;
+}
+
+.conflict-files {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.conflict-file {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.cf-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--faint);
+}
+
+.cf-path {
+  font-family: var(--pb-font-data);
+  font-size: 12px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.cf-meta {
+  font-family: var(--pb-font-data);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.conflict-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .hint {
-  margin: -2px 0 0;
+  margin: -5px 0 0;
   font-size: 12px;
   color: var(--faint);
   line-height: 1.45;

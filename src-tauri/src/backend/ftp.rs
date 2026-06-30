@@ -14,29 +14,70 @@
 //! engine's tokio AsyncRead/AsyncWrite. Backpressure on the channel means the
 //! engine's byte counter tracks real network progress.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use suppaftp::list::File as FtpListItem;
 use suppaftp::tokio::{AsyncFtpStream, AsyncRustlsConnector, AsyncRustlsFtpStream};
+use suppaftp::tokio_rustls::rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use suppaftp::tokio_rustls::rustls::client::WebPkiServerVerifier;
 use suppaftp::tokio_rustls::rustls::crypto::aws_lc_rs;
-use suppaftp::tokio_rustls::rustls::{ClientConfig, RootCertStore};
+use suppaftp::tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use suppaftp::tokio_rustls::rustls::{
+    ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
+};
 use suppaftp::tokio_rustls::TlsConnector as RustlsTlsConnector;
 use suppaftp::types::FileType;
-use suppaftp::FtpResult;
+use suppaftp::{FtpError, FtpResult, Status};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
 /// Chunk size for the streaming data pump.
 const STREAM_CHUNK: usize = 128 * 1024;
+
+/// True for errors that mean the control connection is dead and a fresh login
+/// would recover: a socket-level failure (reset/abort/broken pipe) or a `421`
+/// "service not available — closing control connection" (the idle timeout).
+fn is_ftp_conn_error(e: &FtpError) -> bool {
+    match e {
+        FtpError::ConnectionError(_) => true,
+        FtpError::UnexpectedResponse(resp) => resp.status == Status::NotAvailable,
+        _ => false,
+    }
+}
+
+/// Run an FTP control-connection operation; if it fails because the connection
+/// dropped (idle timeout, reset), transparently reconnect once and retry. `$op`
+/// must use the bound `$conn` guard and evaluate to an `FtpResult`.
+macro_rules! with_reconnect {
+    ($self:ident, $conn:ident, $op:expr) => {{
+        let first = {
+            let mut $conn = $self.conn.lock().await;
+            $op
+        };
+        match first {
+            Err(ref e) if is_ftp_conn_error(e) => {
+                $self.reconnect().await?;
+                let mut $conn = $self.conn.lock().await;
+                $op
+            }
+            other => other,
+        }
+    }};
+}
 
 use super::{BackendError, BackendKind, BackendResult, Entry, EntryKind, StorageBackend};
 
@@ -50,13 +91,19 @@ pub struct FtpConfig {
     pub username: String,
     #[serde(default)]
     pub password: String,
-    /// When true, upgrade to FTPS (explicit TLS) before login.
-    #[serde(default)]
-    pub secure: bool,
+    /// TLS mode: "plain" | "explicit_optional" (try explicit TLS, fall back to
+    /// plain) | "explicit" (require explicit TLS) | "implicit" (TLS from the
+    /// first byte, usually port 990).
+    #[serde(default = "default_encryption")]
+    pub encryption: String,
 }
 
 fn default_port() -> u16 {
     21
+}
+
+fn default_encryption() -> String {
+    "explicit".to_string()
 }
 
 /// A connected FTP control session, plain or TLS-wrapped. The two are distinct
@@ -100,12 +147,16 @@ impl Conn {
     }
 
     /// Download a whole file into memory (handles the retr stream + finalize).
-    async fn retr_all(&mut self, path: &str) -> BackendResult<Vec<u8>> {
+    async fn retr_all(&mut self, path: &str) -> FtpResult<Vec<u8>> {
         macro_rules! read_all {
             ($s:expr) => {{
                 let mut stream = $s.retr_as_stream(path).await?;
                 let mut buf = Vec::new();
-                stream.read_to_end(&mut buf).await?;
+                // A read failure mid-download is a dropped connection.
+                stream
+                    .read_to_end(&mut buf)
+                    .await
+                    .map_err(FtpError::ConnectionError)?;
                 $s.finalize_retr_stream(stream).await?;
                 buf
             }};
@@ -126,13 +177,18 @@ impl Conn {
 
     /// Stream a download: read the data connection in chunks, sending each over
     /// `tx`, then finalize. Stops early (best-effort) if the receiver is gone.
+    /// A non-zero `offset` issues `REST` first to resume from that byte.
     async fn stream_download(
         &mut self,
         path: &str,
+        offset: u64,
         tx: mpsc::Sender<io::Result<Vec<u8>>>,
     ) -> BackendResult<()> {
         macro_rules! pump {
             ($s:expr) => {{
+                if offset > 0 {
+                    $s.resume_transfer(offset as usize).await?;
+                }
                 let mut stream = $s.retr_as_stream(path).await?;
                 let mut buf = vec![0u8; STREAM_CHUNK];
                 loop {
@@ -155,15 +211,21 @@ impl Conn {
     }
 
     /// Stream an upload: write chunks received on `rx` to the data connection as
-    /// they arrive, then finalize.
+    /// they arrive, then finalize. When `append` is true, uses `APPE` so the
+    /// data continues after the file's existing content (resume).
     async fn stream_upload(
         &mut self,
         path: &str,
+        append: bool,
         mut rx: mpsc::Receiver<Vec<u8>>,
     ) -> BackendResult<()> {
         macro_rules! pump {
             ($s:expr) => {{
-                let mut stream = $s.put_with_stream(path).await?;
+                let mut stream = if append {
+                    $s.append_with_stream(path).await?
+                } else {
+                    $s.put_with_stream(path).await?
+                };
                 while let Some(chunk) = rx.recv().await {
                     stream.write_all(&chunk).await?;
                 }
@@ -208,52 +270,332 @@ impl Conn {
 
 pub struct FtpBackend {
     conn: Arc<Mutex<Conn>>,
+    /// Kept so a dropped/idle connection can be transparently re-established.
+    config: FtpConfig,
 }
 
 impl FtpBackend {
     /// Connect, optionally upgrade to TLS, and log in. Returns the backend and
-    /// the server's working directory (the pane's starting path).
-    pub async fn connect(config: &FtpConfig) -> BackendResult<(Self, String)> {
-        let addr = (config.host.as_str(), config.port);
-
-        let mut conn = if config.secure {
-            // Explicit FTPS: connect, then upgrade the control connection.
-            let mut roots = RootCertStore::empty();
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            let tls_config =
-                ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
-                    .with_safe_default_protocol_versions()
-                    .map_err(|e| BackendError::Ftp(e.to_string()))?
-                    .with_root_certificates(roots)
-                    .with_no_client_auth();
-            let connector =
-                AsyncRustlsConnector::from(RustlsTlsConnector::from(Arc::new(tls_config)));
-            let secure = AsyncRustlsFtpStream::connect(addr)
-                .await?
-                .into_secure(connector, &config.host)
-                .await?;
-            Conn::Secure(secure)
-        } else {
-            Conn::Plain(AsyncFtpStream::connect(addr).await?)
-        };
-
-        // Blank username means anonymous FTP.
-        let user = if config.username.is_empty() {
-            "anonymous"
-        } else {
-            config.username.as_str()
-        };
-        conn.login(user, &config.password).await?;
-        conn.set_binary().await?;
-
+    /// the server's working directory (the pane's starting path). An untrusted
+    /// FTPS cert is recorded in `capture` so the caller can prompt and retry.
+    pub async fn connect(
+        config: &FtpConfig,
+        capture: CertCapture,
+    ) -> BackendResult<(Self, String)> {
+        let mut conn = establish(config, &capture).await?;
         let home = conn.pwd().await.unwrap_or_else(|_| "/".to_string());
         Ok((
             Self {
                 conn: Arc::new(Mutex::new(conn)),
+                config: config.clone(),
             },
             home,
         ))
     }
+
+    /// Re-establish the control connection in place after it drops (idle
+    /// timeout, reset). Paths are absolute, so the lost working directory
+    /// doesn't matter. The cert was already trusted at initial connect, so a
+    /// throwaway capture is fine here.
+    async fn reconnect(&self) -> BackendResult<()> {
+        let capture: CertCapture = Arc::new(StdMutex::new(None));
+        let fresh = establish(&self.config, &capture).await?;
+        *self.conn.lock().await = fresh;
+        Ok(())
+    }
+
+    /// Spawn a download task that owns the connection lock and pumps the data
+    /// connection (resuming from `offset` when non-zero) into a channel reader.
+    fn spawn_download(&self, path: &str, offset: u64) -> Box<dyn AsyncRead + Send + Unpin> {
+        let (tx, rx) = mpsc::channel::<io::Result<Vec<u8>>>(4);
+        let conn = self.conn.clone();
+        let path = path.to_string();
+        tokio::spawn(async move {
+            let mut guard = conn.lock_owned().await;
+            if let Err(e) = guard.stream_download(&path, offset, tx.clone()).await {
+                let _ = tx.send(Err(io::Error::other(e.to_string()))).await;
+            }
+        });
+        Box::new(ChannelReader::new(rx))
+    }
+
+    /// Spawn an upload task that owns the connection lock and writes the channel
+    /// to the data connection (appending when `append` is true).
+    fn spawn_upload(&self, path: &str, append: bool) -> Box<dyn AsyncWrite + Send + Unpin> {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(4);
+        let conn = self.conn.clone();
+        let path = path.to_string();
+        let handle = tokio::spawn(async move {
+            let mut guard = conn.lock_owned().await;
+            guard.stream_upload(&path, append, rx).await
+        });
+        Box::new(ChannelWriter::new(tx, handle))
+    }
+}
+
+// ---- FTPS certificate trust (trust-on-first-use) ----
+//
+// Mirrors the SSH known_hosts flow in sftp.rs. The TLS verifier first runs the
+// standard webpki check (Mozilla CA bundle + hostname); only when that fails
+// (self-signed, untrusted CA, or hostname mismatch) does it fall back to a
+// fingerprint trust store (`known_certs.json`). An unknown/changed cert is
+// captured and the handshake rejected so the connect command can surface it to
+// a "trust this certificate?" prompt; once the user trusts the SHA-256
+// fingerprint, the retry connects.
+
+/// Details of an untrusted server certificate, surfaced to the trust prompt.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CertInfo {
+    pub host: String,
+    pub port: u16,
+    /// SHA-256 fingerprint, uppercase hex with colon separators.
+    pub fingerprint: String,
+    pub subject: String,
+    pub issuer: String,
+    /// Subject Alternative Names — the hostnames the cert is actually valid for.
+    pub sans: Vec<String>,
+    pub not_before: String,
+    pub not_after: String,
+    /// True when a *different* cert was previously trusted for this host (a
+    /// possible man-in-the-middle), as opposed to a first-time unknown cert.
+    pub changed: bool,
+}
+
+/// Shared slot the verifier writes an untrusted cert into during the handshake,
+/// for the connect command to read after a rejected connection.
+pub type CertCapture = Arc<StdMutex<Option<CertInfo>>>;
+
+/// Path to the JSON FTPS cert trust store in the app config dir.
+fn cert_store_path() -> PathBuf {
+    super::config_dir().join("known_certs.json")
+}
+
+/// Load the trust store: "host:port" -> SHA-256 fingerprint.
+fn load_cert_store(path: &Path) -> HashMap<String, String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_cert_store(path: &Path, store: &HashMap<String, String>) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(store) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// Trust a certificate fingerprint for `host:port` (called after the user
+/// accepts the prompt). The next connect to that host accepts this exact cert.
+pub fn trust_certificate(host: &str, port: u16, fingerprint: &str) {
+    let path = cert_store_path();
+    let mut store = load_cert_store(&path);
+    store.insert(format!("{host}:{port}"), fingerprint.to_string());
+    save_cert_store(&path, &store);
+}
+
+/// SHA-256 of the DER cert as uppercase colon-separated hex.
+fn fingerprint_of(der: &[u8]) -> String {
+    let digest = Sha256::digest(der);
+    digest
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// A rustls verifier that augments standard webpki validation with a
+/// fingerprint trust store for self-signed / mismatched certs.
+#[derive(Debug)]
+struct TofuVerifier {
+    host: String,
+    port: u16,
+    store_path: PathBuf,
+    capture: CertCapture,
+    /// Standard webpki verifier; trusted-CA + matching-hostname certs pass here
+    /// without a prompt, and it backs the handshake-signature checks.
+    webpki: Arc<WebPkiServerVerifier>,
+}
+
+impl TofuVerifier {
+    /// Build the [`CertInfo`] for an untrusted cert, parsing what details we can
+    /// out of the DER for the prompt.
+    fn describe(&self, der: &[u8], fingerprint: String, changed: bool) -> CertInfo {
+        let mut subject = String::new();
+        let mut issuer = String::new();
+        let mut sans = Vec::new();
+        let mut not_before = String::new();
+        let mut not_after = String::new();
+        if let Ok((_, cert)) = x509_parser::parse_x509_certificate(der) {
+            subject = cert.subject().to_string();
+            issuer = cert.issuer().to_string();
+            not_before = cert.validity().not_before.to_string();
+            not_after = cert.validity().not_after.to_string();
+            if let Ok(Some(ext)) = cert.subject_alternative_name() {
+                for name in &ext.value.general_names {
+                    sans.push(name.to_string());
+                }
+            }
+        }
+        CertInfo {
+            host: self.host.clone(),
+            port: self.port,
+            fingerprint,
+            subject,
+            issuer,
+            sans,
+            not_before,
+            not_after,
+            changed,
+        }
+    }
+}
+
+impl ServerCertVerifier for TofuVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, suppaftp::tokio_rustls::rustls::Error> {
+        // Standard path first: a CA-trusted cert whose name matches needs no
+        // prompt (and we don't record it).
+        if self
+            .webpki
+            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+            .is_ok()
+        {
+            return Ok(ServerCertVerified::assertion());
+        }
+
+        // Otherwise fall back to the fingerprint trust store.
+        let fingerprint = fingerprint_of(end_entity.as_ref());
+        let key = format!("{}:{}", self.host, self.port);
+        let stored = load_cert_store(&self.store_path).get(&key).cloned();
+        match stored {
+            Some(ref known) if *known == fingerprint => Ok(ServerCertVerified::assertion()),
+            other => {
+                let changed = other.is_some();
+                let info = self.describe(end_entity.as_ref(), fingerprint, changed);
+                if let Ok(mut slot) = self.capture.lock() {
+                    *slot = Some(info);
+                }
+                Err(suppaftp::tokio_rustls::rustls::Error::General(
+                    "server certificate is not trusted".to_string(),
+                ))
+            }
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, suppaftp::tokio_rustls::rustls::Error> {
+        self.webpki.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, suppaftp::tokio_rustls::rustls::Error> {
+        self.webpki.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.webpki.supported_verify_schemes()
+    }
+}
+
+/// Build the rustls TLS connector for FTPS. Trusted-CA certs validate normally;
+/// otherwise the [`TofuVerifier`] consults the fingerprint trust store and, for
+/// an unknown/changed cert, records it in `capture` and fails the handshake so
+/// the caller can prompt.
+fn build_connector(host: &str, port: u16, capture: CertCapture) -> BackendResult<AsyncRustlsConnector> {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let provider = Arc::new(aws_lc_rs::default_provider());
+    let webpki = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
+        .build()
+        .map_err(|e| BackendError::Ftp(e.to_string()))?;
+    let verifier = Arc::new(TofuVerifier {
+        host: host.to_string(),
+        port,
+        store_path: cert_store_path(),
+        capture,
+        webpki,
+    });
+    let tls_config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| BackendError::Ftp(e.to_string()))?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    Ok(AsyncRustlsConnector::from(RustlsTlsConnector::from(Arc::new(tls_config))))
+}
+
+/// Open a fresh control session per the configured encryption mode, log in, and
+/// switch to binary mode. An untrusted FTPS cert is recorded in `capture`.
+async fn establish(config: &FtpConfig, capture: &CertCapture) -> BackendResult<Conn> {
+    let addr = (config.host.as_str(), config.port);
+    let connector = || build_connector(&config.host, config.port, capture.clone());
+
+    let mut conn = match config.encryption.as_str() {
+        "plain" => Conn::Plain(AsyncFtpStream::connect(addr).await?),
+        "implicit" => {
+            let secure =
+                AsyncRustlsFtpStream::connect_secure_implicit(addr, connector()?, &config.host)
+                    .await?;
+            Conn::Secure(secure)
+        }
+        "explicit_optional" => {
+            // Try explicit TLS. If TLS negotiated but the certificate was
+            // untrusted (captured), surface that error so the caller can prompt
+            // — don't silently downgrade an encryptable connection to plaintext.
+            // Only fall back to plain when no TLS was on offer at all.
+            match AsyncRustlsFtpStream::connect(addr)
+                .await?
+                .into_secure(connector()?, &config.host)
+                .await
+            {
+                Ok(secure) => Conn::Secure(secure),
+                Err(e) => {
+                    let untrusted_cert =
+                        capture.lock().map(|c| c.is_some()).unwrap_or(false);
+                    if untrusted_cert {
+                        return Err(e.into());
+                    }
+                    Conn::Plain(AsyncFtpStream::connect(addr).await?)
+                }
+            }
+        }
+        // "explicit" (require) and any unknown value.
+        _ => {
+            let secure = AsyncRustlsFtpStream::connect(addr)
+                .await?
+                .into_secure(connector()?, &config.host)
+                .await?;
+            Conn::Secure(secure)
+        }
+    };
+
+    // Blank username means anonymous FTP.
+    let user = if config.username.is_empty() {
+        "anonymous"
+    } else {
+        config.username.as_str()
+    };
+    conn.login(user, &config.password).await?;
+    conn.set_binary().await?;
+    Ok(conn)
 }
 
 #[async_trait]
@@ -263,7 +605,7 @@ impl StorageBackend for FtpBackend {
     }
 
     async fn list(&self, path: &str) -> BackendResult<Vec<Entry>> {
-        let lines = self.conn.lock().await.list(path).await?;
+        let lines = with_reconnect!(self, conn, conn.list(path).await)?;
         let mut entries = Vec::new();
         for line in lines {
             // Skip lines we can't parse (e.g. the "total N" header on some
@@ -300,64 +642,61 @@ impl StorageBackend for FtpBackend {
 
     async fn canonicalize(&self, path: &str) -> BackendResult<String> {
         if path == "." {
-            Ok(self.conn.lock().await.pwd().await?)
+            Ok(with_reconnect!(self, conn, conn.pwd().await)?)
         } else {
             Ok(path.to_string())
         }
     }
 
     async fn open_read(&self, path: &str) -> BackendResult<Box<dyn AsyncRead + Send + Unpin>> {
-        let (tx, rx) = mpsc::channel::<io::Result<Vec<u8>>>(4);
-        let conn = self.conn.clone();
-        let path = path.to_string();
-        // Own the connection lock for the whole download; the channel feeds the
-        // engine as bytes arrive.
-        tokio::spawn(async move {
-            let mut guard = conn.lock_owned().await;
-            if let Err(e) = guard.stream_download(&path, tx.clone()).await {
-                let _ = tx.send(Err(io::Error::other(e.to_string()))).await;
-            }
-        });
-        Ok(Box::new(ChannelReader::new(rx)))
+        Ok(self.spawn_download(path, 0))
+    }
+
+    async fn open_read_at(
+        &self,
+        path: &str,
+        offset: u64,
+    ) -> BackendResult<Box<dyn AsyncRead + Send + Unpin>> {
+        Ok(self.spawn_download(path, offset))
     }
 
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn AsyncWrite + Send + Unpin>> {
-        let (tx, rx) = mpsc::channel::<Vec<u8>>(4);
-        let conn = self.conn.clone();
-        let path = path.to_string();
-        let handle = tokio::spawn(async move {
-            let mut guard = conn.lock_owned().await;
-            guard.stream_upload(&path, rx).await
-        });
-        Ok(Box::new(ChannelWriter::new(tx, handle)))
+        Ok(self.spawn_upload(path, false))
+    }
+
+    async fn open_append(&self, path: &str) -> BackendResult<Box<dyn AsyncWrite + Send + Unpin>> {
+        Ok(self.spawn_upload(path, true))
     }
 
     async fn read_file(&self, path: &str) -> BackendResult<Vec<u8>> {
-        self.conn.lock().await.retr_all(path).await
+        Ok(with_reconnect!(self, conn, conn.retr_all(path).await)?)
     }
 
     async fn write_file(&self, path: &str, data: &[u8]) -> BackendResult<()> {
-        self.conn.lock().await.put(path, data).await?;
+        with_reconnect!(self, conn, conn.put(path, data).await)?;
         Ok(())
     }
 
     async fn mkdir(&self, path: &str) -> BackendResult<()> {
-        self.conn.lock().await.mkdir(path).await?;
+        with_reconnect!(self, conn, conn.mkdir(path).await)?;
         Ok(())
     }
 
     async fn remove(&self, path: &str, is_dir: bool) -> BackendResult<()> {
-        let mut conn = self.conn.lock().await;
-        if is_dir {
-            conn.rmdir(path).await?;
-        } else {
-            conn.rm(path).await?;
-        }
+        with_reconnect!(
+            self,
+            conn,
+            if is_dir {
+                conn.rmdir(path).await
+            } else {
+                conn.rm(path).await
+            }
+        )?;
         Ok(())
     }
 
     async fn rename(&self, from: &str, to: &str) -> BackendResult<()> {
-        self.conn.lock().await.rename(from, to).await?;
+        with_reconnect!(self, conn, conn.rename(from, to).await)?;
         Ok(())
     }
 }
