@@ -1515,6 +1515,11 @@ input[type="number"]::-webkit-inner-spin-button {
   gap: 12px;
 }
 
+/* The update prompt reads better a bit wider than the other small dialogs. */
+.modal-update {
+  min-width: 450px;
+}
+
 .dialog-body {
   margin: 0;
   color: var(--muted);

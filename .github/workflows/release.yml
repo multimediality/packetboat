@@ -17,10 +17,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Fail fast — before any expensive platform builds — if the version files have
-  # drifted out of sync or (on a tag push) the tag doesn't match the version.
+  # Gate the release — before any expensive platform builds — on: version files
+  # in sync, the tag matching the version (on a tag push), and the full test
+  # suite (frontend + backend). `publish` needs this job, so a failure here stops
+  # every platform build and no release is created. Cheap checks run first so a
+  # version/JS problem fails before the Rust toolchain is even installed.
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -39,6 +42,33 @@ jobs:
             exit 1
           fi
           echo "Tag $GITHUB_REF_NAME matches repo version v$FILE_VERSION."
+      - name: Frontend tests
+        run: npm test
+      # cargo test compiles the crate, which links Tauri — needs the Linux
+      # system libs and the Rust toolchain, same as the Linux build below.
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf \
+            build-essential \
+            file \
+            wget
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+          key: verify-tests
+      - name: Backend tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 
   publish:
     needs: verify
@@ -129,6 +159,16 @@ jobs:
 
             The `latest.json`, `.sig`, and `.app.tar.gz` files are used by the in-app
             auto-updater — you don't need them for a manual install.
+
+            ### First launch (unsigned builds)
+
+            These installers aren't OS-code-signed yet, so you may get a warning:
+
+            - **macOS** — if it says *"Packetboat is damaged and can't be opened"*,
+              that's Gatekeeper on the unsigned download, not real damage. Move it
+              to Applications, then run:
+              `xattr -dr com.apple.quarantine /Applications/Packetboat.app`
+            - **Windows** — on the SmartScreen prompt, click **More info → Run anyway**.
           # Publish immediately (no manual draft step).
           releaseDraft: false
           # Publish as normal (non-pre-release) releases so GitHub's

@@ -3332,12 +3332,7 @@ function renderUpdateStatus(s) {
     strong.textContent = `v${s.info.version}`;
     msg.append(strong, " is available.");
     box.appendChild(msg);
-    if (s.info.notes) {
-      const notes = document.createElement("p");
-      notes.className = "update-notes";
-      notes.textContent = s.info.notes;
-      box.appendChild(notes);
-    }
+    // No release-body notes here — see promptUpdate for why.
     const install = document.createElement("button");
     install.type = "button";
     install.className = "btn btn-primary update-install";
@@ -3370,21 +3365,19 @@ function promptUpdate(info) {
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   const form = document.createElement("form");
-  form.className = "modal modal-sm";
+  form.className = "modal modal-sm modal-update";
+  // Note: we intentionally don't show `info.notes` here — the release body is a
+  // download guide meant for the GitHub release page, not in-app update notes,
+  // and it's raw markdown. If a proper changelog is added later, render it as
+  // markdown rather than dumping the release body.
   form.innerHTML =
     "<h2>Update available</h2>" +
     '<p class="dialog-body">Packetboat <strong></strong> is available. Install it and restart now?</p>' +
-    '<p class="hint" data-notes hidden></p>' +
     '<div class="modal-actions">' +
     '<button type="button" class="btn" data-later>Later</button>' +
     '<button type="submit" class="btn btn-primary" data-install>Install and restart</button>' +
     "</div>";
   form.querySelector("strong").textContent = `v${info.version}`;
-  if (info.notes) {
-    const notes = form.querySelector("[data-notes]");
-    notes.textContent = info.notes;
-    notes.hidden = false;
-  }
   backdrop.appendChild(form);
   document.body.appendChild(backdrop);
   const close = () => backdrop.remove();

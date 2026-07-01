@@ -45,6 +45,24 @@ clean dual-pane client, dark by default and free of adware.
   (trust-on-first-use with change detection), and a Settings panel (General /
   Transfers / Updates tabs) with dark / light / system theming.
 
+## Installing
+
+The release installers aren't OS-code-signed yet, so your system may warn you on
+first launch. It's safe to continue:
+
+- **macOS** (Apple Silicon or Intel): if you see *"Packetboat is damaged and
+  can't be opened"*, that's Gatekeeper reacting to the unsigned download — not
+  actual damage. Move the app to `/Applications`, then clear the quarantine flag
+  and open it:
+  ```sh
+  xattr -dr com.apple.quarantine /Applications/Packetboat.app
+  ```
+- **Windows**: SmartScreen may show *"Windows protected your PC"*. Click **More
+  info → Run anyway**.
+
+Proper code signing (Apple Developer ID + notarization; Windows Authenticode) is
+planned to make these warnings go away.
+
 ## Stack
 
 - **Tauri 2** — Rust backend, web frontend, small native binaries.
