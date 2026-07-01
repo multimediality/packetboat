@@ -54,7 +54,21 @@ const STREAM_CHUNK: usize = 128 * 1024;
 fn is_ftp_conn_error(e: &FtpError) -> bool {
     match e {
         FtpError::ConnectionError(_) => true,
-        FtpError::UnexpectedResponse(resp) => resp.status == Status::NotAvailable,
+        // 421 = service not available. The data-transfer lifecycle codes
+        // (125/150/225/226/425/426) should never be the reply to a control
+        // command like LIST/PWD — when they are, the control stream is desynced
+        // by a leftover response from an aborted/stalled transfer, so reconnect
+        // to resync the session.
+        FtpError::UnexpectedResponse(resp) => matches!(
+            resp.status,
+            Status::NotAvailable
+                | Status::AlreadyOpen
+                | Status::AboutToSend
+                | Status::DataConnectionOpen
+                | Status::ClosingDataConnection
+                | Status::CannotOpenDataConnection
+                | Status::TransferAborted
+        ),
         _ => false,
     }
 }
@@ -294,10 +308,55 @@ impl Conn {
     }
 }
 
-pub struct FtpBackend {
-    conn: Arc<Mutex<Conn>>,
-    /// Kept so a dropped/idle connection can be transparently re-established.
+/// Max idle transfer connections kept for reuse (extras are closed on return).
+const POOL_MAX_IDLE: usize = 8;
+
+/// A pool of extra FTP connections for concurrent transfers, so several
+/// transfers to one site run at once instead of serializing on the single
+/// control connection. Each is a full login; idle ones are reused.
+struct XferPool {
     config: FtpConfig,
+    idle: StdMutex<Vec<Conn>>,
+}
+
+impl XferPool {
+    fn new(config: FtpConfig) -> Self {
+        Self {
+            config,
+            idle: StdMutex::new(Vec::new()),
+        }
+    }
+
+    /// Take an idle connection or open a fresh one.
+    async fn acquire(&self) -> BackendResult<Conn> {
+        if let Some(conn) = self.idle.lock().unwrap().pop() {
+            return Ok(conn);
+        }
+        // The cert was trusted on the main connection (already in the trust
+        // store if needed), so a throwaway capture is fine here.
+        let capture: CertCapture = Arc::new(StdMutex::new(None));
+        establish(&self.config, &capture).await
+    }
+
+    /// Return a healthy connection for reuse. A broken one is dropped by the
+    /// caller instead (which closes it), so it never re-enters the pool.
+    fn release(&self, conn: Conn) {
+        let mut idle = self.idle.lock().unwrap();
+        if idle.len() < POOL_MAX_IDLE {
+            idle.push(conn);
+        }
+    }
+}
+
+pub struct FtpBackend {
+    /// Control connection: listings, mkdir, rename, delete, pwd.
+    conn: Arc<Mutex<Conn>>,
+    /// Kept so a dropped/idle control connection can be re-established.
+    config: FtpConfig,
+    /// Extra connections for concurrent transfers (see [`XferPool`]). Keeping
+    /// transfers off the control connection also means an aborted transfer can't
+    /// desync navigation — the aborted connection is simply dropped.
+    pool: Arc<XferPool>,
 }
 
 impl FtpBackend {
@@ -314,6 +373,7 @@ impl FtpBackend {
             Self {
                 conn: Arc::new(Mutex::new(conn)),
                 config: config.clone(),
+                pool: Arc::new(XferPool::new(config.clone())),
             },
             home,
         ))
@@ -330,30 +390,44 @@ impl FtpBackend {
         Ok(())
     }
 
-    /// Spawn a download task that owns the connection lock and pumps the data
-    /// connection (resuming from `offset` when non-zero) into a channel reader.
+    /// Spawn a download task on a pooled connection, pumping the data connection
+    /// (resuming from `offset` when non-zero) into a channel reader.
     fn spawn_download(&self, path: &str, offset: u64) -> Box<dyn AsyncRead + Send + Unpin> {
         let (tx, rx) = mpsc::channel::<io::Result<Vec<u8>>>(4);
-        let conn = self.conn.clone();
-        let path = path.to_string();
-        tokio::spawn(async move {
-            let mut guard = conn.lock_owned().await;
-            if let Err(e) = guard.stream_download(&path, offset, tx.clone()).await {
-                let _ = tx.send(Err(io::Error::other(e.to_string()))).await;
-            }
-        });
-        Box::new(ChannelReader::new(rx))
-    }
-
-    /// Spawn an upload task that owns the connection lock and writes the channel
-    /// to the data connection (appending when `append` is true).
-    fn spawn_upload(&self, path: &str, append: bool) -> Box<dyn AsyncWrite + Send + Unpin> {
-        let (tx, rx) = mpsc::channel::<Vec<u8>>(4);
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let path = path.to_string();
         let handle = tokio::spawn(async move {
-            let mut guard = conn.lock_owned().await;
-            guard.stream_upload(&path, append, rx).await
+            let mut conn = match pool.acquire().await {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(Err(io::Error::other(e.to_string()))).await;
+                    return;
+                }
+            };
+            match conn.stream_download(&path, offset, tx.clone()).await {
+                Ok(()) => pool.release(conn), // healthy → reuse
+                Err(e) => {
+                    // Broken connection: drop it (closes it) and report.
+                    let _ = tx.send(Err(io::Error::other(e.to_string()))).await;
+                }
+            }
+        });
+        Box::new(ChannelReader::new(rx, handle.abort_handle()))
+    }
+
+    /// Spawn an upload task on a pooled connection, writing the channel to the
+    /// data connection (appending when `append` is true).
+    fn spawn_upload(&self, path: &str, append: bool) -> Box<dyn AsyncWrite + Send + Unpin> {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(4);
+        let pool = self.pool.clone();
+        let path = path.to_string();
+        let handle = tokio::spawn(async move {
+            let mut conn = pool.acquire().await?;
+            let result = conn.stream_upload(&path, append, rx).await;
+            if result.is_ok() {
+                pool.release(conn); // healthy → reuse (dropped otherwise)
+            }
+            result
         });
         Box::new(ChannelWriter::new(tx, handle))
     }
@@ -740,14 +814,31 @@ struct ChannelReader {
     rx: mpsc::Receiver<io::Result<Vec<u8>>>,
     leftover: Vec<u8>,
     pos: usize,
+    /// Aborts the download task on drop (e.g. a cancelled/stalled download where
+    /// the task is blocked reading a dead data connection). Aborting drops the
+    /// task's pooled connection, so the broken connection is discarded rather
+    /// than returned to the pool.
+    abort: tokio::task::AbortHandle,
 }
 
 impl ChannelReader {
-    fn new(rx: mpsc::Receiver<io::Result<Vec<u8>>>) -> Self {
+    fn new(rx: mpsc::Receiver<io::Result<Vec<u8>>>, abort: tokio::task::AbortHandle) -> Self {
         Self {
             rx,
             leftover: Vec::new(),
             pos: 0,
+            abort,
+        }
+    }
+}
+
+impl Drop for ChannelReader {
+    fn drop(&mut self) {
+        // Still-running task = unclean drop (cancel/stall): abort it so its
+        // pooled connection is dropped rather than left blocked. A finished
+        // download is a no-op.
+        if !self.abort.is_finished() {
+            self.abort.abort();
         }
     }
 }
@@ -787,6 +878,10 @@ struct ChannelWriter {
     tx: Option<mpsc::Sender<Vec<u8>>>,
     reserve: Option<ReserveFut>,
     handle: Option<tokio::task::JoinHandle<BackendResult<()>>>,
+    /// Aborts the upload task. Used on drop so a stalled/cancelled transfer
+    /// doesn't leave the task blocked on a dead data connection. Aborting drops
+    /// the task's pooled connection, discarding the broken connection.
+    abort: tokio::task::AbortHandle,
     finish: Option<Pin<Box<dyn Future<Output = io::Result<()>> + Send>>>,
 }
 
@@ -798,8 +893,20 @@ impl ChannelWriter {
         Self {
             tx: Some(tx),
             reserve: None,
+            abort: handle.abort_handle(),
             handle: Some(handle),
             finish: None,
+        }
+    }
+}
+
+impl Drop for ChannelWriter {
+    fn drop(&mut self) {
+        // If the task is still running we're being dropped mid-transfer
+        // (stall/cancel/error): abort it so its pooled connection is dropped
+        // rather than left blocked. A cleanly finished transfer is a no-op.
+        if !self.abort.is_finished() {
+            self.abort.abort();
         }
     }
 }

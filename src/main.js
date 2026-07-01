@@ -37,8 +37,20 @@ function cacheEls() {
   el.setShowLog = document.getElementById("set-show-log");
   el.setShowQueue = document.getElementById("set-show-queue");
   el.setCloseToTray = document.getElementById("set-close-to-tray");
+  el.setNotifications = document.getElementById("set-notifications");
+  el.setMaxTransfers = document.getElementById("set-max-transfers");
+  el.setMaxDownloads = document.getElementById("set-max-downloads");
+  el.setMaxUploads = document.getElementById("set-max-uploads");
+  el.setReplaceInvalid = document.getElementById("set-replace-invalid");
+  el.setInvalidReplacement = document.getElementById("set-invalid-replacement");
   el.setConflictDownload = document.getElementById("set-conflict-download");
   el.setConflictUpload = document.getElementById("set-conflict-upload");
+  el.setUpdateCheck = document.getElementById("set-update-check");
+  el.setUpdateInterval = document.getElementById("set-update-interval");
+  el.updateIntervalField = document.getElementById("update-interval-field");
+  el.checkUpdatesBtn = document.getElementById("set-check-updates");
+  el.updateStatus = document.getElementById("update-status");
+  el.updateLast = document.getElementById("update-last");
   el.status = document.getElementById("status-msg");
   el.logpanel = document.getElementById("logpanel");
   el.logList = document.getElementById("log-list");
@@ -62,6 +74,10 @@ function cacheEls() {
   el.sitePass = document.getElementById("site-pass");
   el.siteLogon = document.getElementById("site-logon");
   el.siteLogonHint = document.getElementById("site-logon-hint");
+  el.siteOpField = document.getElementById("site-op-field");
+  el.siteOpReference = document.getElementById("site-op-reference");
+  el.siteOpTest = document.getElementById("site-op-test");
+  el.siteOpResult = document.getElementById("site-op-result");
   el.siteEncryption = document.getElementById("site-encryption");
   el.siteEncryptionField = document.getElementById("site-encryption-field");
   el.sitePassive = document.getElementById("site-passive");
@@ -154,7 +170,7 @@ function sortEntries(entries) {
 }
 
 // The file currently being dragged between panes, or null.
-let dragItem = null;
+let dragItems = null; // items being dragged between panes (the selection)
 
 function renderList(body, entries, side) {
   if (entries.length === 0) {
@@ -163,6 +179,7 @@ function renderList(body, entries, side) {
   }
   sortEntries(entries);
   body.innerHTML = "";
+  body._anchor = null; // fresh listing → reset the shift-select pivot
   const frag = document.createDocumentFragment();
   for (const e of entries) {
     const row = document.createElement("div");
@@ -175,7 +192,7 @@ function renderList(body, entries, side) {
       `<span class="cell size">${e.kind === "dir" ? "" : formatSize(e.size)}</span>` +
       `<span class="cell date">${formatDate(e.modified)}</span>`;
 
-    row.addEventListener("click", () => selectRow(body, row));
+    row.addEventListener("click", (ev) => onRowClick(body, row, ev));
     row.addEventListener("dblclick", () => {
       if (navigable) {
         if (side === "local") navigateLocal(e.path);
@@ -189,14 +206,28 @@ function renderList(body, entries, side) {
     // recursively (their whole subtree).
     row.draggable = true;
     row.addEventListener("dragstart", (ev) => {
-      dragItem = { side, name: e.name, path: e.path, size: e.size, kind: e.kind };
-      row.classList.add("dragging");
+      // Drag the whole selection if this row is part of it; otherwise the drag
+      // becomes the selection.
+      if (!row.classList.contains("selected")) {
+        clearSelection(body);
+        row.classList.add("selected");
+        body._anchor = [...body.querySelectorAll(".row")].indexOf(row);
+      }
+      const rows = selectedRows(body);
+      dragItems = rows.map((r) => ({
+        side,
+        name: r._entry.name,
+        path: r._entry.path,
+        size: r._entry.size,
+        kind: r._entry.kind,
+      }));
+      rows.forEach((r) => r.classList.add("dragging"));
       ev.dataTransfer.effectAllowed = "copy";
-      ev.dataTransfer.setData("text/plain", e.path);
+      ev.dataTransfer.setData("text/plain", dragItems.map((d) => d.path).join("\n"));
     });
     row.addEventListener("dragend", () => {
-      dragItem = null;
-      row.classList.remove("dragging");
+      dragItems = null;
+      body.querySelectorAll(".row.dragging").forEach((r) => r.classList.remove("dragging"));
     });
     if (navigable) {
       // Folder rows are also drop targets — drop onto one to transfer into it.
@@ -221,17 +252,165 @@ function renderList(body, entries, side) {
   body.appendChild(frag);
 }
 
-function selectRow(body, row) {
+// ---- Multi-select ----
+// Selection is the `.selected` class on rows; `body._anchor` is the index of the
+// last plain/Ctrl click, used as the pivot for Shift-range selection.
+
+function selectedRows(body) {
+  return [...body.querySelectorAll(".row.selected")];
+}
+function selectedEntries(body) {
+  return selectedRows(body)
+    .map((r) => r._entry)
+    .filter(Boolean);
+}
+function clearSelection(body) {
   body.querySelectorAll(".row.selected").forEach((r) => r.classList.remove("selected"));
-  row.classList.add("selected");
+}
+
+// Row click: plain = single, Ctrl/Cmd = toggle one, Shift = range from the
+// anchor (Ctrl+Shift extends the range without clearing).
+function onRowClick(body, row, ev) {
+  const rows = [...body.querySelectorAll(".row")];
+  const idx = rows.indexOf(row);
+  const additive = ev.ctrlKey || ev.metaKey;
+  if (ev.shiftKey && body._anchor != null && body._anchor < rows.length) {
+    if (!additive) clearSelection(body);
+    const [a, b] = body._anchor <= idx ? [body._anchor, idx] : [idx, body._anchor];
+    for (let i = a; i <= b; i += 1) rows[i].classList.add("selected");
+  } else if (additive) {
+    row.classList.toggle("selected");
+    body._anchor = idx;
+  } else {
+    clearSelection(body);
+    row.classList.add("selected");
+    body._anchor = idx;
+  }
+}
+
+// ---- Type-ahead: jump to a file by typing its name (FileZilla / Explorer) ----
+// Typing printable characters in a focused pane selects the first entry whose
+// name starts with what's been typed. The buffer clears after a short pause;
+// repeating a single letter cycles through the entries starting with it.
+const typeahead = { buffer: "", timer: null, body: null };
+
+function resetTypeahead() {
+  clearTimeout(typeahead.timer);
+  typeahead.buffer = "";
+  typeahead.timer = null;
+  typeahead.body = null;
+}
+
+function onPaneTypeahead(body, ev) {
+  if (ev.ctrlKey || ev.altKey || ev.metaKey) return; // leave shortcuts alone
+  if (ev.key === "Escape") return resetTypeahead();
+  if (ev.key.length !== 1) return; // arrows, Enter, Backspace, modifiers, …
+  if (ev.key === " " && typeahead.buffer === "") return; // ignore a leading space
+  const rows = [...body.querySelectorAll(".row")];
+  if (rows.length === 0) return;
+  ev.preventDefault(); // don't let Space scroll the list, etc.
+
+  if (typeahead.body !== body) typeahead.buffer = ""; // switched panes → fresh
+  typeahead.body = body;
+  clearTimeout(typeahead.timer);
+  typeahead.timer = setTimeout(resetTypeahead, 800);
+  typeahead.buffer += ev.key.toLowerCase();
+
+  const names = rows.map((r) => (r._entry ? r._entry.name.toLowerCase() : ""));
+  const selected = body.querySelector(".row.selected");
+  const cur = selected ? rows.indexOf(selected) : -1;
+
+  // Repeating one letter (e.g. "aaa") cycles through matches starting just after
+  // the current selection; otherwise jump to the first prefix match from the top.
+  const cycling = typeahead.buffer.length > 1 && /^(.)\1+$/.test(typeahead.buffer);
+  const needle = cycling ? typeahead.buffer[0] : typeahead.buffer;
+
+  let match = -1;
+  if (cycling) {
+    for (let i = 1; i <= rows.length; i += 1) {
+      const idx = (cur + i) % rows.length;
+      if (names[idx].startsWith(needle)) {
+        match = idx;
+        break;
+      }
+    }
+  } else {
+    match = names.findIndex((n) => n.startsWith(needle));
+  }
+  if (match < 0) return;
+
+  clearSelection(body);
+  rows[match].classList.add("selected");
+  body._anchor = match;
+  rows[match].scrollIntoView({ block: "nearest" });
+}
+
+// Rubber-band (marquee) selection: drag a rectangle over empty pane space to
+// select the rows it touches. Ctrl/Cmd adds to the existing selection. Set up
+// once per pane body (rows themselves handle their own click/drag).
+function setupMarquee(body) {
+  let band = null;
+  let sx = 0;
+  let sy = 0;
+  let additive = false;
+  let base = [];
+  const onMove = (ev) => {
+    if (!band) return;
+    const x1 = Math.min(sx, ev.clientX);
+    const y1 = Math.min(sy, ev.clientY);
+    const x2 = Math.max(sx, ev.clientX);
+    const y2 = Math.max(sy, ev.clientY);
+    const rect = body.getBoundingClientRect();
+    band.style.left = `${x1 - rect.left + body.scrollLeft}px`;
+    band.style.top = `${y1 - rect.top + body.scrollTop}px`;
+    band.style.width = `${x2 - x1}px`;
+    band.style.height = `${y2 - y1}px`;
+    for (const r of body.querySelectorAll(".row")) {
+      const rr = r.getBoundingClientRect();
+      const hit = rr.left < x2 && rr.right > x1 && rr.top < y2 && rr.bottom > y1;
+      if (hit) r.classList.add("selected");
+      else if (!(additive && base.includes(r))) r.classList.remove("selected");
+    }
+  };
+  const onUp = () => {
+    if (band) band.remove();
+    band = null;
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+  };
+  body.addEventListener("mousedown", (ev) => {
+    // Only start a marquee on empty space — rows drag/click themselves.
+    if (ev.button !== 0 || ev.target.closest(".row")) return;
+    additive = ev.ctrlKey || ev.metaKey;
+    base = additive ? selectedRows(body) : [];
+    if (!additive) clearSelection(body);
+    body._anchor = null;
+    sx = ev.clientX;
+    sy = ev.clientY;
+    band = document.createElement("div");
+    band.className = "marquee";
+    body.appendChild(band);
+    ev.preventDefault();
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
 }
 
 // ---- Navigation ----
 async function navigateLocal(path) {
+  const tabAtStart = activeTabId;
   setPaneMessage(el.bodyLocal, "Loading…");
   try {
     const entries = await invoke("list_local", { path });
+    // If the user switched tabs while this was loading, discard the stale result
+    // instead of writing it into the now-active tab (which would corrupt sync).
+    if (tabAtStart !== activeTabId) return;
     state.local.path = path;
+    // Remember this tab's local folder so switching tabs restores it (each
+    // connection browses its own local dir — important for synced browsing and
+    // sites with a default local directory).
+    const t = activeTab();
+    if (t) t.localPath = path;
     el.pathLocal.value = path;
     renderList(el.bodyLocal, entries, "local");
     setStatus(`Local: ${path} — ${entries.length} item${entries.length === 1 ? "" : "s"}`);
@@ -245,9 +424,14 @@ async function navigateLocal(path) {
 
 async function navigateRemote(path) {
   if (!state.remote.connected) return;
+  // Bind this navigation to the tab it started on, so a listing that finishes
+  // after the user switched tabs is discarded rather than applied to (or run
+  // against) the wrong connection.
+  const id = activeTabId;
   setPaneMessage(el.bodyRemote, "Loading…");
   try {
-    const entries = await invoke("list_remote", { id: activeTabId, path });
+    const entries = await invoke("list_remote", { id, path });
+    if (id !== activeTabId) return; // switched tabs mid-load — stale result
     state.remote.path = path;
     el.pathRemote.value = path;
     renderList(el.bodyRemote, entries, "remote");
@@ -684,19 +868,41 @@ function activateTab(id, navigate) {
   renderTabs();
   syncRemoteUI();
   renderTree("remote");
-  if (navigate) {
-    if (tab && tab.remote.path) navigateRemote(tab.remote.path);
-    else {
-      el.bodyRemote.innerHTML = "";
-      el.pathRemote.value = "";
-    }
+  if (navigate) restoreTabPanes(tab);
+}
+
+// Restore a tab's remote and local folders on switch. Each pane goes back to its
+// saved path (they were consistent when the tab was last active, so the mirror
+// early-returns). Bails between steps if the user switched tabs again mid-load,
+// so a slow restore can't stomp on the newly-active tab.
+async function restoreTabPanes(tab) {
+  const id = tab ? tab.id : null;
+  if (tab && tab.localPath && tab.localPath !== state.local.path) {
+    await navigateLocal(tab.localPath);
+    if (id !== activeTabId) return; // switched away while local was loading
+  }
+  if (id !== activeTabId) return;
+  if (tab && tab.remote.path) {
+    await navigateRemote(tab.remote.path);
+  } else {
+    el.bodyRemote.innerHTML = "";
+    el.pathRemote.value = "";
   }
 }
 
 function addTab(id, label, cloud = false) {
   // `cloud` marks object-store backends (S3/B2/WebDAV) which can't resume
   // uploads (no append) — used to hide that option in the conflict prompt.
-  tabs.push({ id, label, cloud, remote: { path: null, connected: true }, tree: freshTree() });
+  // `localPath` seeds from the current local folder; the connect flow overrides
+  // it if the site has a default local dir.
+  tabs.push({
+    id,
+    label,
+    cloud,
+    remote: { path: null, connected: true },
+    tree: freshTree(),
+    localPath: state.local.path,
+  });
   activateTab(id, false); // the caller navigates to the login dir
 }
 
@@ -1070,6 +1276,8 @@ function fillSiteForm(site) {
   el.siteUser.value = site ? site.username || "" : "";
   el.sitePass.value = "";
   el.siteLogon.value = site ? site.logon_type || "ask" : "normal";
+  el.siteOpReference.value = site ? site.op_reference || "" : "";
+  setOpResult("", "");
   // Cloud sites pre-fill the per-service inputs from saved config; secret keys
   // are loaded from the keychain in selectSite().
   updateProtocolFields(site && site.config ? { ...site.config } : {});
@@ -1122,6 +1330,255 @@ function newSite() {
   selectSite(id);
 }
 
+// ---- FileZilla import ----
+
+// UTF-8-safe base64 decode for FileZilla's <Pass encoding="base64"> values.
+function decodeBase64(s) {
+  try {
+    return new TextDecoder().decode(Uint8Array.from(atob(s), (c) => c.charCodeAt(0)));
+  } catch (_) {
+    return "";
+  }
+}
+
+// FileZilla serializes <RemoteDir> as "<type> <prefixLen> [<segLen> <segment>]…"
+// where each path segment is preceded by its character length (so segments may
+// contain spaces). E.g. "1 0 11 public_html 14 learningcarton" → "/public_html/
+// learningcarton". Returns "" for an empty/unparseable value.
+function parseFileZillaRemoteDir(raw) {
+  const s = (raw || "").trim();
+  if (!s) return "";
+  let i = 0;
+  const nextToken = () => {
+    let j = s.indexOf(" ", i);
+    if (j === -1) j = s.length;
+    const tok = s.slice(i, j);
+    i = j + 1;
+    return tok;
+  };
+  nextToken(); // server type (1 = Unix) — ignored
+  const prefixLen = parseInt(nextToken(), 10) || 0;
+  if (prefixLen > 0) i += prefixLen + 1; // skip a server prefix (VMS/MVS), if any
+  const segments = [];
+  while (i < s.length) {
+    const len = parseInt(nextToken(), 10);
+    if (isNaN(len)) break;
+    segments.push(s.slice(i, i + len));
+    i += len + 1;
+  }
+  return segments.length ? "/" + segments.join("/") : "";
+}
+
+// Map one FileZilla <Server> element to a Packetboat site + its password.
+// Returns null for unsupported protocols (Storj, S3, …) or missing host.
+function fileZillaServerToSite(server) {
+  const t = (tag) => {
+    const e = server.querySelector(`:scope > ${tag}`);
+    return e ? e.textContent.trim() : "";
+  };
+  // FileZilla ServerProtocol: 0=FTP(opportunistic TLS), 1=SFTP, 3=FTPS(implicit),
+  // 4=FTPES(explicit), 6=INSECURE_FTP(plain). Others (HTTP/S3/Storj/…) unsupported.
+  let protocol;
+  let encryption = "";
+  switch (parseInt(t("Protocol"), 10)) {
+    case 0:
+      protocol = "ftp";
+      encryption = "explicit_optional";
+      break;
+    case 1:
+      protocol = "sftp";
+      break;
+    case 3:
+      protocol = "ftp";
+      encryption = "implicit";
+      break;
+    case 4:
+      protocol = "ftp";
+      encryption = "explicit";
+      break;
+    case 6:
+      protocol = "ftp";
+      encryption = "plain";
+      break;
+    default:
+      return null; // unsupported backend
+  }
+  const host = t("Host");
+  if (!host) return null;
+  // FileZilla Logontype: 0=Anonymous, 1=Normal, others (Ask/Interactive/…) → ask.
+  const logonCode = parseInt(t("Logontype"), 10);
+  const logon_type = logonCode === 0 ? "anonymous" : logonCode === 1 ? "normal" : "ask";
+  const passEl = server.querySelector(":scope > Pass");
+  let password = "";
+  if (passEl && logon_type === "normal") {
+    password =
+      passEl.getAttribute("encoding") === "base64"
+        ? decodeBase64(passEl.textContent)
+        : passEl.textContent;
+  }
+  return {
+    site: {
+      id: (crypto.randomUUID && crypto.randomUUID()) || String(Date.now() + Math.random()),
+      name: t("Name") || host,
+      protocol,
+      host,
+      port: parseInt(t("Port"), 10) || defaultPort(protocol, encryption),
+      username: t("User"),
+      logon_type,
+      encryption,
+      // FileZilla PasvMode: MODE_ACTIVE forces active; default/passive → passive.
+      passive: t("PasvMode") !== "MODE_ACTIVE",
+      config: {},
+      local_dir: t("LocalDir"), // FileZilla stores a plain OS path
+      remote_dir: parseFileZillaRemoteDir(t("RemoteDir")),
+      sync_browsing: t("SyncBrowsing") === "1",
+    },
+    password,
+  };
+}
+
+// Import sites from a FileZilla Site Manager XML export. Saved passwords move
+// into the OS keychain (an upgrade — FileZilla stores them base64-plaintext).
+// Local/remote default dirs import too (remote dirs are decoded from FileZilla's
+// serialized format). On a name/host/user/protocol collision the user is
+// prompted per site (skip / overwrite / keep both), with an apply-to-all option.
+async function importFileZilla() {
+  let path;
+  try {
+    path = await invoke("plugin:dialog|open", {
+      options: {
+        multiple: false,
+        title: "Choose a FileZilla site export",
+        filters: [{ name: "FileZilla export", extensions: ["xml"] }],
+      },
+    });
+  } catch (e) {
+    setSitesError(`Import failed: ${e}`);
+    return;
+  }
+  if (typeof path !== "string") return; // cancelled
+  let xml;
+  try {
+    xml = await invoke("read_text_file", { path });
+  } catch (e) {
+    setSitesError(`Couldn't read that file: ${e}`);
+    return;
+  }
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  if (doc.querySelector("parsererror") || !doc.querySelector("FileZilla3")) {
+    setSitesError("That doesn't look like a FileZilla site export.");
+    return;
+  }
+  let skipped = 0;
+  const added = [];
+  const overwrites = []; // { target: existingSite, data: importedSite }
+  const secrets = []; // { id, password }
+  let applyToAll = null; // once chosen, the action for every remaining duplicate
+  // querySelectorAll("Server") flattens the folder tree — nested sites included.
+  for (const server of doc.querySelectorAll("Server")) {
+    const mapped = fileZillaServerToSite(server);
+    if (!mapped) {
+      skipped++;
+      continue;
+    }
+    const s = mapped.site;
+    const existing = sites.find(
+      (e) =>
+        e.protocol === s.protocol &&
+        e.host === s.host &&
+        e.username === s.username &&
+        e.name === s.name,
+    );
+    if (existing) {
+      let action = applyToAll;
+      if (!action) {
+        const res = await promptDuplicate(s);
+        if (!res) return; // cancelled — nothing has been applied yet
+        action = res.action;
+        if (res.all) applyToAll = action;
+      }
+      if (action === "skip") {
+        skipped++;
+        continue;
+      }
+      if (action === "overwrite") {
+        overwrites.push({ target: existing, data: s });
+        // Only replace the saved password if the import actually carries one.
+        if (mapped.password) secrets.push({ id: existing.id, password: mapped.password });
+        continue;
+      }
+      // "keep" → fall through and add as a separate copy (s has a fresh id).
+    }
+    added.push(s);
+    if (mapped.password) secrets.push({ id: s.id, password: mapped.password });
+  }
+  if (added.length + overwrites.length === 0) {
+    setSitesError(`Nothing imported${skipped ? ` — ${skipped} skipped or unsupported` : ""}.`);
+    return;
+  }
+  // Apply now — after the loop — so a mid-import cancel leaves sites untouched.
+  // Overwrites keep the existing id so the keychain entry stays linked.
+  for (const o of overwrites) Object.assign(o.target, o.data, { id: o.target.id });
+  sites.push(...added);
+  try {
+    await invoke("sites_save", { sites });
+    for (const sec of secrets) {
+      try {
+        await invoke("secret_set", sec);
+      } catch (_) {
+        /* a single password failing shouldn't abort the import */
+      }
+    }
+  } catch (e) {
+    setSitesError(`Couldn't save imported sites: ${e}`);
+    return;
+  }
+  setSitesError(null);
+  renderSites();
+  const parts = [];
+  if (added.length) parts.push(`${added.length} imported`);
+  if (overwrites.length) parts.push(`${overwrites.length} updated`);
+  if (skipped) parts.push(`${skipped} skipped`);
+  setStatus(`FileZilla import: ${parts.join(", ")}.`);
+}
+
+// Per-duplicate prompt during import. Resolves to { action: "skip" | "overwrite"
+// | "keep", all: bool } or null to cancel the whole import.
+function promptDuplicate(site) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    const form = document.createElement("form");
+    form.className = "modal modal-sm";
+    form.innerHTML =
+      "<h2>Site already exists</h2>" +
+      '<p class="dialog-body">A site matching <strong></strong> is already in Packetboat.</p>' +
+      '<label class="radio"><input type="radio" name="dup" value="skip" checked /> Skip — keep the existing site</label>' +
+      '<label class="radio"><input type="radio" name="dup" value="overwrite" /> Overwrite it with the imported one</label>' +
+      '<label class="radio"><input type="radio" name="dup" value="keep" /> Keep both (import as a copy)</label>' +
+      '<label class="check"><input type="checkbox" class="switch" id="dup-all" /> Apply to all remaining duplicates</label>' +
+      '<div class="modal-actions"><button type="button" class="btn" data-cancel>Cancel import</button><button type="submit" class="btn btn-primary">OK</button></div>';
+    form.querySelector("strong").textContent = `“${site.name}” (${site.host})`;
+    backdrop.appendChild(form);
+    document.body.appendChild(backdrop);
+    const done = (r) => {
+      backdrop.remove();
+      resolve(r);
+    };
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      done({
+        action: form.querySelector('input[name="dup"]:checked').value,
+        all: form.querySelector("#dup-all").checked,
+      });
+    });
+    form.querySelector("[data-cancel]").addEventListener("click", () => done(null));
+    backdrop.addEventListener("click", (e) => {
+      if (e.target === backdrop) done(null);
+    });
+  });
+}
+
 // Native folder picker for the "Default local directory" field.
 async function browseLocalDir() {
   try {
@@ -1167,6 +1624,7 @@ function readSiteForm() {
     port: parseInt(el.sitePort.value, 10) || defaultPort(protocol, el.siteEncryption.value),
     username: el.siteUser.value.trim(),
     logon_type: el.siteLogon.value,
+    op_reference: normalizeOpRef(el.siteOpReference.value),
     encryption: protocol === "ftp" ? el.siteEncryption.value : "",
     passive: protocol === "ftp" ? el.sitePassive.checked : true,
     config: {},
@@ -1238,6 +1696,7 @@ async function connectUsing({
   username,
   logonType,
   password,
+  opReference,
   encryption,
   passive,
   siteId,
@@ -1251,6 +1710,18 @@ async function connectUsing({
   if (logonType === "anonymous") {
     user = "anonymous";
     pw = "";
+  } else if (logonType === "1password") {
+    if (!opReference) {
+      setStatus("Add a 1Password secret reference for this site first.", true);
+      return;
+    }
+    setStatus("Resolving 1Password reference…");
+    try {
+      pw = await invoke("resolve_op_reference", { reference: opReference });
+    } catch (e) {
+      setStatus(String(e), true);
+      return;
+    }
   } else {
     // "Normal" sites keep the password in the keychain; pull it if we don't
     // already have a typed one.
@@ -1283,13 +1754,16 @@ async function connectUsing({
   });
 }
 
-// Enable/disable the username and password fields to match the logon type.
+// Enable/disable the username, password, and 1Password-reference fields to match
+// the logon type.
 function updateLogonFields() {
   const t = el.siteLogon.value;
   const showUser = t !== "anonymous";
   const showPass = t === "normal";
+  const showOp = t === "1password";
   el.siteUser.closest(".field").hidden = !showUser;
   el.sitePass.closest(".field").hidden = !showPass;
+  el.siteOpField.hidden = !showOp;
   if (!showUser) el.siteUser.value = "";
   if (!showPass) el.sitePass.value = "";
   el.siteLogonHint.textContent =
@@ -1298,7 +1772,56 @@ function updateLogonFields() {
         "Username and password are saved — the password goes in your OS keychain (Windows Credential Manager), never the site file.",
       ask: "Only the username is saved. You'll be asked for the password each time you connect.",
       anonymous: "Connects as “anonymous” — no username or password needed (FTP).",
+      "1password":
+        "The username is saved. At connect time Packetboat resolves the reference with the 1Password CLI (op) — only the pointer is stored, never the password.",
     }[t] || "";
+  // Warn upfront if the 1Password CLI isn't installed (the result line is
+  // otherwise blank until a Test / connect).
+  if (showOp && !el.siteOpResult.textContent) {
+    ensureOpCheck().then((ok) => {
+      if (!ok && el.siteLogon.value === "1password" && !el.siteOpResult.textContent) {
+        setOpResult("1Password CLI (op) not found on your PATH.", "err");
+      }
+    });
+  }
+}
+
+// One-time (cached) check of whether the `op` CLI is available.
+let opAvailableCache = null;
+async function ensureOpCheck() {
+  if (opAvailableCache === null) {
+    try {
+      opAvailableCache = await invoke("op_available");
+    } catch (_) {
+      opAvailableCache = false;
+    }
+  }
+  return opAvailableCache;
+}
+
+function setOpResult(text, kind) {
+  el.siteOpResult.textContent = text;
+  el.siteOpResult.className = `hint op-result${kind ? ` ${kind}` : ""}`;
+}
+
+// 1Password's "Copy Secret Reference" wraps the value in quotes; strip any
+// surrounding quotes/whitespace so a pasted reference is usable as-is.
+function normalizeOpRef(v) {
+  return v.replace(/^[\s"']+|[\s"']+$/g, "");
+}
+
+// "Test" button: resolve the reference once to confirm it works, without
+// revealing the value.
+async function testOpReference() {
+  const ref = normalizeOpRef(el.siteOpReference.value);
+  if (!ref) return setOpResult("Enter a reference first.", "err");
+  setOpResult("Resolving…", "");
+  try {
+    await invoke("resolve_op_reference", { reference: ref });
+    setOpResult("✓ Resolved successfully.", "ok");
+  } catch (e) {
+    setOpResult(String(e), "err");
+  }
 }
 
 // Connect from the Site Manager's Connect button (uses the live form values,
@@ -1333,6 +1856,7 @@ async function connectSite() {
     username: form.username,
     logonType: form.logon_type,
     password: typed,
+    opReference: form.op_reference,
     encryption: form.encryption,
     passive: form.passive,
     siteId: site.id,
@@ -1361,6 +1885,7 @@ async function connectFromMenu(site) {
     username: site.username,
     logonType: site.logon_type,
     password: "",
+    opReference: site.op_reference,
     encryption: site.encryption,
     passive: site.passive,
     siteId: site.id,
@@ -1409,6 +1934,12 @@ function closeSites() {
 const queue = new Map();
 // Full TransferRequest per id, kept so a failed/cancelled transfer can be retried.
 const transferRequests = new Map();
+// Per-run tally for the "queue finished" notification: success/failure counts
+// since the queue was last idle, the set of connection ids the run touched (so a
+// single-tab run's notification can jump to that tab), plus the previous active
+// count so we can spot the active→0 drain edge.
+const queueRun = { success: 0, failed: 0, conns: new Set() };
+let prevActiveCount = 0;
 
 // Files transfer to the *other* pane's current directory: a local file goes
 // up to the remote, a remote file comes down to the local pane.
@@ -1437,6 +1968,27 @@ async function dirEntries(side, dir) {
   return map;
 }
 
+// The local OS. Filename-character sanitizing only matters on Windows, whose
+// filesystem forbids \ / : * ? " < > | (and control chars) in names.
+const localIsWindows = /windows/i.test(navigator.userAgent);
+// eslint-disable-next-line no-control-regex
+const INVALID_LOCAL_CHARS = /[<>:"/\\|?*\x00-\x1f]/g;
+
+// Replace characters the local OS forbids in a single filename (per the setting),
+// so a download from a server that allows them (e.g. Unix) can still be written.
+function sanitizeLocalName(name) {
+  if (!localIsWindows || !settings.replaceInvalidChars) return name;
+  // The replacement can't itself contain forbidden chars (would reintroduce them).
+  const repl = String(settings.invalidCharReplacement ?? "_").replace(INVALID_LOCAL_CHARS, "");
+  return name.replace(INVALID_LOCAL_CHARS, repl);
+}
+
+// Sanitize each component of a relative path ("a:b/c?d" → "a_b/c_d"), keeping the
+// "/" separators, for nested folder-download destinations.
+function sanitizeRelPath(rel) {
+  return rel.split("/").map(sanitizeLocalName).join("/");
+}
+
 // Build a non-colliding "name (n).ext" within the destination directory.
 function dedupeName(name, dirMap) {
   const dot = name.lastIndexOf(".");
@@ -1457,6 +2009,10 @@ function dedupeName(name, dirMap) {
 // `allowPrompt` is false for batch (folder) transfers so they don't prompt per
 // file — they fall back to overwrite when the policy is "ask". `resumable` is
 // false for paths that can't resume (OS drag-drop via put_bytes).
+// Conflict action chosen "for this session" (per direction). Shadows the saved
+// default without persisting — cleared on restart or when the default changes.
+const sessionConflict = { download: null, upload: null };
+
 async function resolveConflict(
   direction,
   destSide,
@@ -1468,7 +2024,9 @@ async function resolveConflict(
   allowPrompt,
   resumable = true,
 ) {
-  let policy = direction === "download" ? settings.conflictDownload : settings.conflictUpload;
+  let policy =
+    sessionConflict[direction] ||
+    (direction === "download" ? settings.conflictDownload : settings.conflictUpload);
   if (policy === "overwrite") return { proceed: true, name };
   const dir = await dirEntries(destSide, destDir);
   const target = dir.get(name);
@@ -1483,7 +2041,9 @@ async function resolveConflict(
     if (!allowPrompt) return { proceed: true, name };
     const choice = await promptConflict({ direction, name, destDir, srcSize, srcModified, srcPath, target, canResume });
     if (!choice) return { proceed: false }; // cancelled
-    if (choice.always) {
+    if (choice.scope === "session") {
+      sessionConflict[direction] = choice.action; // this run only, not saved
+    } else if (choice.scope === "always") {
       if (direction === "download") settings.conflictDownload = choice.action;
       else settings.conflictUpload = choice.action;
       saveSettings();
@@ -1517,7 +2077,7 @@ async function resolveConflict(
 }
 
 // "Target file already exists" prompt. Resolves to
-// { action, always } or null if cancelled.
+// { action, scope } (scope: "once" | "session" | "always") or null if cancelled.
 function promptConflict({ direction, name, destDir, srcSize, srcModified, srcPath, target, canResume }) {
   return new Promise((resolve) => {
     const srcSideName = direction === "upload" ? "Local (source)" : "Remote (source)";
@@ -1535,6 +2095,7 @@ function promptConflict({ direction, name, destDir, srcSize, srcModified, srcPat
     form.className = "modal modal-conflict";
     form.innerHTML =
       "<h2>Target file already exists</h2>" +
+      '<div class="dialog-scroll">' +
       `<p class="dialog-body"><strong>${escapeHtml(name)}</strong> already exists in the destination. Choose what to do.</p>` +
       '<div class="conflict-files">' +
       `<div class="conflict-file"><span class="cf-label">${srcSideName}</span>` +
@@ -1552,7 +2113,13 @@ function promptConflict({ direction, name, destDir, srcSize, srcModified, srcPat
       '<label class="radio"><input type="radio" name="cf" value="rename" /> Rename (keep both)</label>' +
       '<label class="radio"><input type="radio" name="cf" value="skip" /> Skip</label>' +
       "</div>" +
-      '<label class="field-toggle"><span>Always use this action</span><input type="checkbox" class="switch" id="cf-always" /></label>' +
+      '<label class="field-toggle"><span>Remember this choice</span>' +
+      '<select id="cf-scope" class="cf-scope">' +
+      '<option value="once">Just this time</option>' +
+      '<option value="session">For this session</option>' +
+      '<option value="always">Always (save as default)</option>' +
+      "</select></label>" +
+      "</div>" +
       '<div class="modal-actions"><button type="button" class="btn" data-cancel>Cancel</button><button type="submit" class="btn btn-primary">OK</button></div>';
     // Set paths via textContent (avoid HTML-escaping issues with odd chars).
     const paths = form.querySelectorAll(".cf-path");
@@ -1568,11 +2135,13 @@ function promptConflict({ direction, name, destDir, srcSize, srcModified, srcPat
       e.preventDefault();
       done({
         action: form.querySelector('input[name="cf"]:checked').value,
-        always: form.querySelector("#cf-always").checked,
+        scope: form.querySelector("#cf-scope").value,
       });
     });
     form.querySelector("[data-cancel]").addEventListener("click", () => done(null));
-    backdrop.addEventListener("click", (e) => {
+    // mousedown (not click) so releasing a resize drag over the backdrop doesn't
+    // dismiss the prompt.
+    backdrop.addEventListener("mousedown", (e) => {
       if (e.target === backdrop) done(null);
     });
   });
@@ -1590,12 +2159,15 @@ async function transferTo(entry, sourceSide, destSide, destDir) {
     return;
   }
   const direction = destSide === "remote" ? "upload" : "download";
+  // Downloading to Windows: swap characters the local OS forbids in filenames
+  // so the file can actually be written (e.g. "a:b?.log" → "a_b_.log").
+  const destName = direction === "download" ? sanitizeLocalName(entry.name) : entry.name;
   conflictCache.clear();
   const r = await resolveConflict(
     direction,
     destSide,
     destDir,
-    entry.name,
+    destName,
     entry.size,
     entry.modified,
     entry.path,
@@ -1622,13 +2194,17 @@ async function transferFolder(entry, sourceSide, destSide, destDir) {
     return;
   }
   // Recreate the destination directory tree. entry.name is the new root; the
-  // walk lists directories before their children, so parents come first.
+  // walk lists directories before their children, so parents come first. When
+  // downloading, sanitize every dest name/component so server names with
+  // Windows-forbidden characters land on disk (source paths stay original).
+  const clean = direction === "download" ? sanitizeLocalName : (s) => s;
+  const cleanRel = direction === "download" ? sanitizeRelPath : (s) => s;
   const mkdirCmd = destSide === "local" ? "local_mkdir" : "remote_mkdir";
-  const destRoot = joinPath(destDir, entry.name);
-  await safeMkdir(mkdirCmd, destDir, entry.name);
+  const destRoot = joinPath(destDir, clean(entry.name));
+  await safeMkdir(mkdirCmd, destDir, clean(entry.name));
   for (const t of tree) {
     if (t.kind !== "dir") continue;
-    await safeMkdir(mkdirCmd, joinPath(destRoot, relParent(t.rel)), relName(t.rel));
+    await safeMkdir(mkdirCmd, joinPath(destRoot, cleanRel(relParent(t.rel))), clean(relName(t.rel)));
   }
   // Queue every file into its destination subdirectory, applying the file-exists
   // policy per file (folders don't prompt — they overwrite when policy is "ask").
@@ -1637,8 +2213,8 @@ async function transferFolder(entry, sourceSide, destSide, destDir) {
   let skipped = 0;
   for (const t of tree) {
     if (t.kind !== "file") continue;
-    const fileDestDir = joinPath(destRoot, relParent(t.rel));
-    const fileName = relName(t.rel);
+    const fileDestDir = joinPath(destRoot, cleanRel(relParent(t.rel)));
+    const fileName = clean(relName(t.rel));
     const r = await resolveConflict(direction, destSide, fileDestDir, fileName, t.size, t.modified, t.path, false);
     if (!r.proceed) {
       addSkippedRow(direction, fileName, t.size);
@@ -1718,8 +2294,14 @@ function handleDrop(ev, destSide, destDir) {
   const files = ev.dataTransfer.files;
   if (files && files.length > 0) {
     importExternalFiles(files, destSide, destDir);
-  } else if (dragItem && dragItem.side !== destSide) {
-    transferTo(dragItem, dragItem.side, destSide, destDir);
+  } else if (dragItems && dragItems.length && dragItems[0].side !== destSide) {
+    transferManyTo(dragItems, dragItems[0].side, destSide, destDir);
+  }
+}
+
+async function transferManyTo(items, srcSide, destSide, destDir) {
+  for (const item of items) {
+    await transferTo(item, srcSide, destSide, destDir);
   }
 }
 
@@ -1750,12 +2332,19 @@ function onTransferUpdate(u) {
       break;
     case "retry":
       setQueueStat(u.id, `Retrying (${u.attempt}/${u.max})…`);
+      if (u.message) {
+        const it = queue.get(u.id);
+        const what = it ? it.name : `transfer ${u.id}`;
+        log(`Retrying ${what} (${u.attempt}/${u.max}): ${u.message}`, "error");
+      }
       break;
     case "done": {
       const it = queue.get(u.id);
       if (it) {
         it.fill.style.width = "100%";
         it.stat.textContent = "Done";
+        queueRun.success++;
+        if (it.connectionId != null) queueRun.conns.add(it.connectionId);
         setRowStatus(it, "success");
         log(`Transfer complete: ${it.name}`, "success");
         // Show the result in the destination pane (debounced so a folder of
@@ -1778,6 +2367,8 @@ function onTransferUpdate(u) {
       if (it) {
         it.stat.textContent = "Failed";
         it.row.title = u.message;
+        queueRun.failed++;
+        if (it.connectionId != null) queueRun.conns.add(it.connectionId);
         setRowStatus(it, "failed");
       }
       log(`Transfer failed: ${u.message}`, "error");
@@ -1793,12 +2384,34 @@ function scheduleRefresh(side) {
   refreshTimers[side] = setTimeout(() => refresh(side), 400);
 }
 
+// Join a directory and file name with the destination's path style.
+function joinTransferPath(dir, name, remote) {
+  if (!dir) return name || "";
+  const sep = remote ? "/" : dir.includes("\\") ? "\\" : "/";
+  return dir.replace(/[/\\]+$/, "") + sep + name;
+}
+
 function addQueueRow(u) {
+  const isDownload = u.direction === "download";
+  // The Queued event carries src (remote for downloads, local for uploads) +
+  // dst_dir, so we can show the full local and remote paths. Skipped-file rows
+  // pass only id/direction/name/size, so guard for missing path data.
+  const hasPaths = u.src != null && u.dst_dir != null;
+  const localPath = hasPaths
+    ? isDownload
+      ? joinTransferPath(u.dst_dir, u.name, false)
+      : u.src
+    : "";
+  const remotePath = hasPaths ? (isDownload ? u.src : joinTransferPath(u.dst_dir, u.name, true)) : "";
+  const tab = tabs.find((t) => t.id === u.connection_id);
+  const server = tab ? tab.label : "";
+
   const row = document.createElement("div");
   row.className = "q-row";
   row.dataset.status = "active";
   row.innerHTML =
-    `<span class="q-dir">${u.direction === "download" ? "↓" : "↑"}</span>` +
+    '<div class="q-head">' +
+    `<span class="q-dir" title="${isDownload ? "Download" : "Upload"}">${isDownload ? "↓" : "↑"}</span>` +
     `<span class="q-name"></span>` +
     `<span class="q-size">${u.size ? formatSize(u.size) : ""}</span>` +
     `<div class="q-bar"><div class="q-fill"></div></div>` +
@@ -1806,13 +2419,34 @@ function addQueueRow(u) {
     `<span class="q-actions">` +
     `<button class="q-act q-cancel" title="Cancel transfer" aria-label="Cancel">✕</button>` +
     `<button class="q-act q-retry" title="Retry transfer" aria-label="Retry" hidden>↻</button>` +
-    `</span>`;
+    `</span>` +
+    "</div>" +
+    '<div class="q-paths">' +
+    `<span class="q-server"></span>` +
+    `<span class="q-route"><span class="q-local"></span>` +
+    `<span class="q-arrow">${isDownload ? "←" : "→"}</span><span class="q-remote"></span></span>` +
+    "</div>";
   row.querySelector(".q-name").textContent = u.name;
+  const paths = row.querySelector(".q-paths");
+  if (hasPaths || server) {
+    const serverEl = row.querySelector(".q-server");
+    serverEl.textContent = server;
+    serverEl.title = server;
+    const localEl = row.querySelector(".q-local");
+    const remoteEl = row.querySelector(".q-remote");
+    localEl.textContent = localPath;
+    localEl.title = localPath;
+    remoteEl.textContent = remotePath;
+    remoteEl.title = remotePath;
+  } else {
+    paths.hidden = true; // skipped rows have no path data
+  }
   document.getElementById("queue-list").appendChild(row);
   const it = {
     row,
     direction: u.direction,
     name: u.name,
+    connectionId: u.connection_id,
     fill: row.querySelector(".q-fill"),
     stat: row.querySelector(".q-stat"),
     cancelBtn: row.querySelector(".q-cancel"),
@@ -1874,6 +2508,37 @@ function updateQueueCounts() {
   document.getElementById("count-active").textContent = active;
   document.getElementById("count-failed").textContent = failed;
   document.getElementById("count-success").textContent = success;
+  // The queue just drained (last active transfer reached a terminal state) —
+  // notify with this run's tally.
+  if (prevActiveCount > 0 && active === 0) notifyQueueDrained();
+  prevActiveCount = active;
+}
+
+// Desktop notification when the queue finishes, but only while Packetboat is in
+// the background (hidden to tray or another window focused) — no point nudging
+// someone who's watching the queue. Resets the per-run tally either way.
+function notifyQueueDrained() {
+  const { success, failed, conns } = queueRun;
+  // If the whole run went to one connection, clicking the notification can jump
+  // to that tab; otherwise just focus the window.
+  const tab = conns.size === 1 ? [...conns][0] : null;
+  queueRun.success = 0;
+  queueRun.failed = 0;
+  queueRun.conns = new Set();
+  if (!settings.notifications || success + failed === 0 || document.hasFocus()) return;
+  const files = (n) => `${n} file${n === 1 ? "" : "s"}`;
+  let title, body;
+  if (failed === 0) {
+    title = "Transfers complete";
+    body = `${files(success)} transferred.`;
+  } else if (success === 0) {
+    title = "Transfers failed";
+    body = `${failed} transfer${failed === 1 ? "" : "s"} failed.`;
+  } else {
+    title = "Transfers finished";
+    body = `${success} transferred, ${failed} failed.`;
+  }
+  invoke("notify", { title, body, tab }).catch(() => {});
 }
 
 function switchQueueTab(tab) {
@@ -1962,20 +2627,31 @@ function showMenu(x, y, items) {
   activeMenu = menu;
 }
 
-function showFileMenu(x, y, entry, side) {
+function showFileMenu(x, y, entries, side) {
   const items = [];
-  if (entry.kind !== "dir") {
-    items.push({
-      label: side === "remote" ? "Download" : "Upload",
-      action: () => transferEntry(entry, side),
-    });
-  }
-  items.push({ label: "Rename…", action: () => renameEntry(entry, side) });
-  items.push({ label: "Delete", danger: true, action: () => deleteEntry(entry, side) });
+  const n = entries.length;
+  const many = n > 1 ? ` (${n})` : "";
+  items.push({
+    label: (side === "remote" ? "Download" : "Upload") + many,
+    action: () => transferManyEntries(entries, side),
+  });
+  if (n === 1) items.push({ label: "Rename…", action: () => renameEntry(entries[0], side) });
+  items.push({
+    label: n > 1 ? `Delete${many}` : "Delete",
+    danger: true,
+    action: () => deleteEntries(entries, side),
+  });
   items.push({ sep: true });
   items.push({ label: "New folder…", action: () => newFolder(side) });
   items.push({ label: "Refresh", action: () => refresh(side) });
   showMenu(x, y, items);
+}
+
+async function transferManyEntries(entries, side) {
+  for (const e of entries) {
+    // eslint-disable-next-line no-await-in-loop
+    await transferEntry(e, side);
+  }
 }
 
 function showBgMenu(x, y, side) {
@@ -2001,6 +2677,26 @@ async function renameEntry(entry, side) {
   }
 }
 
+// Delete an entry. The local backend removes folders recursively already; remote
+// backends' rmdir/RMD is not recursive, so for a remote folder we walk its tree
+// (list_tree returns full backend-native paths, parents before children) and
+// delete files first, then directories deepest-first, then the folder itself.
+async function removeEntry(entry, side) {
+  if (entry.kind === "dir" && side !== "local") {
+    const tree = await invoke("list_tree", { side, id: activeTabId, path: entry.path });
+    const rm = (path, dir) => invoke("remote_remove", { id: activeTabId, path, dir });
+    for (const t of tree) if (t.kind !== "dir") await rm(t.path, false);
+    for (const t of [...tree].reverse()) if (t.kind === "dir") await rm(t.path, true);
+    await rm(entry.path, true);
+    return;
+  }
+  await invoke(side === "local" ? "local_remove" : "remote_remove", {
+    id: activeTabId,
+    path: entry.path,
+    dir: entry.kind === "dir",
+  });
+}
+
 async function deleteEntry(entry, side) {
   const detail =
     entry.kind === "dir"
@@ -2008,16 +2704,36 @@ async function deleteEntry(entry, side) {
       : "This can't be undone.";
   if (!(await confirmDialog(`Delete "${entry.name}"?`, detail, "Delete"))) return;
   try {
-    await invoke(side === "local" ? "local_remove" : "remote_remove", {
-      id: activeTabId,
-      path: entry.path,
-      dir: entry.kind === "dir",
-    });
+    await removeEntry(entry, side);
     setStatus(`Deleted ${entry.name}`);
     refresh(side);
   } catch (e) {
     setStatus(`Delete failed: ${e}`, true);
   }
+}
+
+async function deleteEntries(entries, side) {
+  if (entries.length <= 1) {
+    if (entries.length === 1) await deleteEntry(entries[0], side);
+    return;
+  }
+  const detail = "This can't be undone. Folders are deleted with everything in them.";
+  if (!(await confirmDialog(`Delete ${entries.length} items?`, detail, "Delete"))) return;
+  let failed = 0;
+  for (const e of entries) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await removeEntry(e, side);
+    } catch (_) {
+      failed += 1;
+    }
+  }
+  setStatus(
+    failed
+      ? `Deleted ${entries.length - failed} of ${entries.length} — ${failed} failed`
+      : `Deleted ${entries.length} items`,
+  );
+  refresh(side);
 }
 
 async function newFolder(side) {
@@ -2114,7 +2830,10 @@ function promptPassword(title, label) {
 
 // Make a pane's list a drop target for files dragged from the other pane.
 function dropAccepts(ev, targetSide) {
-  return [...ev.dataTransfer.types].includes("Files") || (dragItem && dragItem.side !== targetSide);
+  return (
+    [...ev.dataTransfer.types].includes("Files") ||
+    (dragItems && dragItems.length && dragItems[0].side !== targetSide)
+  );
 }
 
 function setupDropZone(listEl, targetSide) {
@@ -2145,10 +2864,27 @@ const settings = {
   // When on (the default), closing the window hides Packetboat to the system
   // tray instead of quitting.
   closeToTray: true,
+  // Desktop notification when the transfer queue finishes while the app is in
+  // the background.
+  notifications: true,
+  // Concurrent transfers: overall cap (1-10) plus per-direction caps (0 = no
+  // limit).
+  maxTransfers: 2,
+  maxDownloads: 0,
+  maxUploads: 0,
+  // Replace characters the local OS forbids in filenames when downloading, and
+  // the character to replace them with.
+  replaceInvalidChars: true,
+  invalidCharReplacement: "_",
   // What to do when a transfer's target file already exists. One of:
   // ask | overwrite | newer | size | rename | skip.
   conflictDownload: "ask",
   conflictUpload: "ask",
+  // Auto-update: whether to check on a schedule, how often (launch | daily |
+  // weekly | monthly), and when the last successful check ran (epoch ms).
+  updateCheckEnabled: true,
+  updateInterval: "launch",
+  lastUpdateCheck: 0,
 };
 
 function loadSettings() {
@@ -2160,6 +2896,22 @@ function loadSettings() {
   applyTheme(settings.theme);
   applyPanelVisibility();
   applyCloseToTray();
+  applyTransferLimits();
+}
+
+// Push the concurrency limits to the transfer engine (no-op without a backend).
+function applyTransferLimits() {
+  invoke("set_transfer_limits", {
+    max: clampInt(settings.maxTransfers, 1, 10, 2),
+    downloads: clampInt(settings.maxDownloads, 0, 10, 0),
+    uploads: clampInt(settings.maxUploads, 0, 10, 0),
+  }).catch(() => {});
+}
+
+function clampInt(v, min, max, fallback) {
+  const n = parseInt(v, 10);
+  if (Number.isNaN(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
 }
 
 // Push the close-to-tray preference to the backend, which owns the window's
@@ -2202,13 +2954,36 @@ function openSettings() {
   el.setShowLog.checked = settings.showLog;
   el.setShowQueue.checked = settings.showQueue;
   el.setCloseToTray.checked = settings.closeToTray;
+  el.setNotifications.checked = settings.notifications;
+  el.setMaxTransfers.value = settings.maxTransfers;
+  el.setMaxDownloads.value = settings.maxDownloads;
+  el.setMaxUploads.value = settings.maxUploads;
+  el.setReplaceInvalid.checked = settings.replaceInvalidChars;
+  el.setInvalidReplacement.value = settings.invalidCharReplacement;
+  el.setInvalidReplacement.disabled = !settings.replaceInvalidChars;
   el.setConflictDownload.value = settings.conflictDownload;
   el.setConflictUpload.value = settings.conflictUpload;
+  el.setUpdateCheck.checked = settings.updateCheckEnabled;
+  el.setUpdateInterval.value = settings.updateInterval;
+  el.updateIntervalField.hidden = !settings.updateCheckEnabled;
+  renderUpdateStatus(null); // clear any stale result from a prior open
+  renderLastChecked();
+  switchSettingsTab("general");
   el.settingsModal.hidden = false;
 }
 
 function closeSettings() {
   el.settingsModal.hidden = true;
+}
+
+// Show one settings category (General / Transfers) and mark its tab active.
+function switchSettingsTab(name) {
+  el.settingsModal.querySelectorAll(".settings-tab").forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.settingsTab === name);
+  });
+  el.settingsModal.querySelectorAll(".settings-section").forEach((section) => {
+    section.hidden = section.dataset.settingsSection !== name;
+  });
 }
 
 // Prompt shown when connecting while already connected.
@@ -2273,6 +3048,7 @@ function wireEvents() {
   document.getElementById("sites-close").addEventListener("click", closeSites);
   document.getElementById("site-new").addEventListener("click", newSite);
   document.getElementById("site-delete").addEventListener("click", deleteSite);
+  document.getElementById("site-import").addEventListener("click", importFileZilla);
   document.getElementById("site-save").addEventListener("click", saveSite);
   document.getElementById("site-connect").addEventListener("click", connectSite);
   el.siteLocalBrowse.addEventListener("click", browseLocalDir);
@@ -2291,6 +3067,12 @@ function wireEvents() {
   // Implicit FTPS conventionally uses port 990; reflect that as the default.
   el.siteEncryption.addEventListener("change", reDefaultSitePort);
   el.siteLogon.addEventListener("change", updateLogonFields);
+  el.siteOpTest.addEventListener("click", testOpReference);
+  // Clean pasted references (1Password copies them wrapped in quotes) as you go.
+  el.siteOpReference.addEventListener("input", () => {
+    const cleaned = normalizeOpRef(el.siteOpReference.value);
+    if (cleaned !== el.siteOpReference.value) el.siteOpReference.value = cleaned;
+  });
 
   document.querySelectorAll(".pane-tools .icon-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -2335,8 +3117,13 @@ function wireEvents() {
 
   document.getElementById("tool-settings").addEventListener("click", openSettings);
   document.getElementById("settings-close").addEventListener("click", closeSettings);
-  el.settingsModal.addEventListener("click", (e) => {
+  // Dismiss on a backdrop press (mousedown, like the Site Manager) rather than
+  // click — so releasing a resize drag outside the modal doesn't close it.
+  el.settingsModal.addEventListener("mousedown", (e) => {
     if (e.target === el.settingsModal) closeSettings();
+  });
+  el.settingsModal.querySelectorAll(".settings-tab").forEach((tab) => {
+    tab.addEventListener("click", () => switchSettingsTab(tab.dataset.settingsTab));
   });
   el.setTheme.addEventListener("change", () => {
     settings.theme = el.setTheme.value;
@@ -2362,14 +3149,53 @@ function wireEvents() {
     saveSettings();
     applyCloseToTray();
   });
+  el.setNotifications.addEventListener("change", () => {
+    settings.notifications = el.setNotifications.checked;
+    saveSettings();
+  });
+  for (const [input, key] of [
+    [el.setMaxTransfers, "maxTransfers"],
+    [el.setMaxDownloads, "maxDownloads"],
+    [el.setMaxUploads, "maxUploads"],
+  ]) {
+    input.addEventListener("change", () => {
+      settings[key] = clampInt(input.value, key === "maxTransfers" ? 1 : 0, 10, settings[key]);
+      input.value = settings[key];
+      saveSettings();
+      applyTransferLimits();
+    });
+  }
+  el.setReplaceInvalid.addEventListener("change", () => {
+    settings.replaceInvalidChars = el.setReplaceInvalid.checked;
+    el.setInvalidReplacement.disabled = !settings.replaceInvalidChars;
+    saveSettings();
+  });
+  el.setInvalidReplacement.addEventListener("change", () => {
+    // Strip any forbidden char so the replacement can't reintroduce one.
+    settings.invalidCharReplacement = el.setInvalidReplacement.value.replace(INVALID_LOCAL_CHARS, "");
+    el.setInvalidReplacement.value = settings.invalidCharReplacement;
+    saveSettings();
+  });
   el.setConflictDownload.addEventListener("change", () => {
     settings.conflictDownload = el.setConflictDownload.value;
+    sessionConflict.download = null; // new default clears any session override
     saveSettings();
   });
   el.setConflictUpload.addEventListener("change", () => {
     settings.conflictUpload = el.setConflictUpload.value;
+    sessionConflict.upload = null;
     saveSettings();
   });
+  el.setUpdateCheck.addEventListener("change", () => {
+    settings.updateCheckEnabled = el.setUpdateCheck.checked;
+    el.updateIntervalField.hidden = !settings.updateCheckEnabled;
+    saveSettings();
+  });
+  el.setUpdateInterval.addEventListener("change", () => {
+    settings.updateInterval = el.setUpdateInterval.value;
+    saveSettings();
+  });
+  el.checkUpdatesBtn.addEventListener("click", manualCheckUpdate);
   matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => {
     if (settings.theme === "system") applyTheme("system");
   });
@@ -2387,17 +3213,28 @@ function wireEvents() {
     if (!el.sitesModal.hidden) closeSites();
   });
 
-  // Right-click context menus on each pane (rows and empty area).
+  // Right-click context menus + marquee selection on each pane.
   for (const [body, side] of [
     [el.bodyLocal, "local"],
     [el.bodyRemote, "remote"],
   ]) {
+    setupMarquee(body);
+    // Focusable (so it can receive keystrokes) + type-ahead: clicking a pane
+    // focuses its body, then typing jumps to the matching file.
+    body.tabIndex = -1;
+    body.addEventListener("keydown", (ev) => onPaneTypeahead(body, ev));
     body.addEventListener("contextmenu", (ev) => {
       ev.preventDefault();
       const rowEl = ev.target.closest(".row");
       if (rowEl && rowEl._entry) {
-        selectRow(body, rowEl);
-        showFileMenu(ev.clientX, ev.clientY, rowEl._entry, side);
+        // Right-clicking outside the current selection re-selects just that row;
+        // right-clicking within it keeps the whole selection for the menu.
+        if (!rowEl.classList.contains("selected")) {
+          clearSelection(body);
+          rowEl.classList.add("selected");
+          body._anchor = [...body.querySelectorAll(".row")].indexOf(rowEl);
+        }
+        showFileMenu(ev.clientX, ev.clientY, selectedEntries(body), side);
       } else if (!(side === "remote" && !state.remote.connected)) {
         showBgMenu(ev.clientX, ev.clientY, side);
       }
@@ -2432,6 +3269,7 @@ async function init() {
   log("Welcome to Packetboat.");
   try {
     const v = await invoke("app_version");
+    appVersion = v || "";
     const versionEl = document.getElementById("app-version");
     if (versionEl && v) versionEl.textContent = `v${v}`;
   } catch (_) {
@@ -2439,6 +3277,12 @@ async function init() {
   }
   if (tauriEvent) {
     await tauriEvent.listen("transfer://update", (e) => onTransferUpdate(e.payload));
+    // Clicking a "transfers finished" notification for a single-tab run jumps to
+    // that connection's tab (the window is already brought forward by Rust).
+    await tauriEvent.listen("notification://activate", (e) => {
+      const id = e.payload;
+      if (tabs.some((t) => t.id === id)) activateTab(id, true);
+    });
   }
   try {
     await loadTreeRoots("local");
@@ -2447,6 +3291,162 @@ async function init() {
   } catch (e) {
     setStatus(`Could not open home directory: ${e}`, true);
   }
+  if (shouldAutoCheckUpdate()) checkForUpdate();
+}
+
+// The app's own version (from the Rust `app_version` command), shown in the
+// Updates tab. Set in init(); empty until then.
+let appVersion = "";
+
+const UPDATE_INTERVAL_MS = {
+  daily: 24 * 60 * 60 * 1000,
+  weekly: 7 * 24 * 60 * 60 * 1000,
+  monthly: 30 * 24 * 60 * 60 * 1000,
+};
+
+// Whether an automatic (launch-time) update check is due, per the user's
+// "check automatically" toggle and chosen frequency.
+function shouldAutoCheckUpdate() {
+  if (!settings.updateCheckEnabled) return false;
+  if (settings.updateInterval === "launch") return true;
+  const waitMs = UPDATE_INTERVAL_MS[settings.updateInterval];
+  if (!waitMs) return true; // unknown interval → don't suppress
+  return Date.now() - (settings.lastUpdateCheck || 0) >= waitMs;
+}
+
+// Ask the backend whether a newer signed release is available; if so, prompt.
+// Silent on failure (dev builds, offline, updater not yet configured). Records
+// the time only on a successful check so a failure retries next launch.
+async function checkForUpdate() {
+  try {
+    const info = await invoke("check_update");
+    settings.lastUpdateCheck = Date.now();
+    saveSettings();
+    if (info) promptUpdate(info);
+  } catch (_) {
+    /* no update / not configured */
+  }
+}
+
+// Manual "Check now" from the Updates settings tab: shows inline status rather
+// than the launch prompt.
+async function manualCheckUpdate() {
+  el.checkUpdatesBtn.disabled = true;
+  renderUpdateStatus({ state: "checking" });
+  try {
+    const info = await invoke("check_update");
+    settings.lastUpdateCheck = Date.now();
+    saveSettings();
+    renderLastChecked();
+    renderUpdateStatus(info ? { state: "available", info } : { state: "uptodate" });
+  } catch (err) {
+    console.warn("update check failed:", err);
+    renderUpdateStatus({ state: "error" });
+  } finally {
+    el.checkUpdatesBtn.disabled = false;
+  }
+}
+
+// Render the inline update-check status box. `s` is null (hidden) or
+// { state: "checking" | "uptodate" | "error" | "available", info? }.
+function renderUpdateStatus(s) {
+  const box = el.updateStatus;
+  if (!box) return;
+  box.textContent = "";
+  box.className = "update-status";
+  if (!s) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  if (s.state === "checking") {
+    box.classList.add("muted");
+    box.textContent = "Checking for updates…";
+  } else if (s.state === "uptodate") {
+    box.classList.add("success");
+    box.textContent = appVersion
+      ? `You're on the latest version (v${appVersion}).`
+      : "You're on the latest version.";
+  } else if (s.state === "error") {
+    box.classList.add("muted");
+    box.textContent =
+      "Couldn't check for updates. This works only in the installed app, with a network connection.";
+  } else if (s.state === "available") {
+    const msg = document.createElement("p");
+    msg.className = "update-msg";
+    const strong = document.createElement("strong");
+    strong.textContent = `v${s.info.version}`;
+    msg.append(strong, " is available.");
+    box.appendChild(msg);
+    if (s.info.notes) {
+      const notes = document.createElement("p");
+      notes.className = "update-notes";
+      notes.textContent = s.info.notes;
+      box.appendChild(notes);
+    }
+    const install = document.createElement("button");
+    install.type = "button";
+    install.className = "btn btn-primary update-install";
+    install.textContent = "Install and restart";
+    install.addEventListener("click", async () => {
+      install.disabled = true;
+      install.textContent = "Downloading…";
+      try {
+        await invoke("install_update"); // app restarts on success
+      } catch (err) {
+        console.warn("update install failed:", err);
+        renderUpdateStatus({ state: "error" });
+      }
+    });
+    box.appendChild(install);
+  }
+}
+
+// "Last checked <date>" line in the Updates tab (blank if never checked).
+function renderLastChecked() {
+  if (!el.updateLast) return;
+  el.updateLast.textContent = settings.lastUpdateCheck
+    ? `Last checked ${formatDate(Math.floor(settings.lastUpdateCheck / 1000))}`
+    : "";
+}
+
+// "Update available" prompt. On accept, downloads + installs + relaunches (the
+// install command doesn't return — the app restarts into the new version).
+function promptUpdate(info) {
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  const form = document.createElement("form");
+  form.className = "modal modal-sm";
+  form.innerHTML =
+    "<h2>Update available</h2>" +
+    '<p class="dialog-body">Packetboat <strong></strong> is available. Install it and restart now?</p>' +
+    '<p class="hint" data-notes hidden></p>' +
+    '<div class="modal-actions">' +
+    '<button type="button" class="btn" data-later>Later</button>' +
+    '<button type="submit" class="btn btn-primary" data-install>Install and restart</button>' +
+    "</div>";
+  form.querySelector("strong").textContent = `v${info.version}`;
+  if (info.notes) {
+    const notes = form.querySelector("[data-notes]");
+    notes.textContent = info.notes;
+    notes.hidden = false;
+  }
+  backdrop.appendChild(form);
+  document.body.appendChild(backdrop);
+  const close = () => backdrop.remove();
+  form.querySelector("[data-later]").addEventListener("click", close);
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = form.querySelector("[data-install]");
+    btn.disabled = true;
+    btn.textContent = "Downloading…";
+    try {
+      await invoke("install_update"); // app restarts on success
+    } catch (err) {
+      setStatus(`Update failed: ${err}`, true);
+      close();
+    }
+  });
 }
 
 window.addEventListener("DOMContentLoaded", init);

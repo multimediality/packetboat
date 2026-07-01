@@ -2,6 +2,8 @@
 //! invokes, and the wiring between them and the storage backends.
 
 mod backend;
+#[cfg(windows)]
+mod toast;
 mod transfer;
 
 use std::collections::HashMap;
@@ -14,7 +16,7 @@ use backend::local::LocalBackend;
 use backend::sftp::{SftpBackend, SftpConfig};
 use backend::{BackendError, BackendResult, Entry, EntryKind, StorageBackend};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 use transfer::{Connections, TransferManager, TransferRequest};
 
@@ -32,9 +34,15 @@ struct Site {
     #[serde(default)]
     username: String,
     /// How to authenticate: "normal" (save password in the keychain), "ask"
-    /// (prompt each connect), or "anonymous".
+    /// (prompt each connect), "anonymous", or "1password" (resolve `op_reference`
+    /// via the 1Password CLI at connect time).
     #[serde(default = "default_logon_type")]
     logon_type: String,
+    /// 1Password secret reference (`op://vault/item/field`) resolved at connect
+    /// time when `logon_type` is "1password". A pointer, not a secret — safe to
+    /// store in the site file.
+    #[serde(default)]
+    op_reference: String,
     /// FTP TLS mode (plain | explicit_optional | explicit | implicit). Empty for
     /// non-FTP protocols.
     #[serde(default)]
@@ -324,6 +332,13 @@ fn cancel_transfer(state: State<'_, AppState>, id: u64) {
     state.transfers.cancel(id);
 }
 
+/// Set the transfer concurrency limits: overall max simultaneous transfers, plus
+/// per-direction caps (0 = unlimited). Applied to newly-started transfers.
+#[tauri::command]
+fn set_transfer_limits(state: State<'_, AppState>, max: usize, downloads: usize, uploads: usize) {
+    state.transfers.set_limits(max, downloads, uploads);
+}
+
 /// Write raw bytes to `dir`/`name` on the given side ("local" or "remote").
 /// Used for external drops (files dragged from the OS file manager), where the
 /// source path isn't available so the content is sent directly.
@@ -481,6 +496,196 @@ fn is_dev() -> bool {
     cfg!(debug_assertions)
 }
 
+/// Show a desktop notification (transfer-complete / failure summaries). Called
+/// by the frontend when the transfer queue drains while the app is in the
+/// background. `tab` is the connection id to focus when the whole run belonged to
+/// one connection (so a click can jump to that tab); `None` when it spanned
+/// several tabs or none.
+#[tauri::command]
+fn notify(app: AppHandle, title: String, body: String, tab: Option<u32>) {
+    // Windows: send a branded toast (Packetboat name + icon) under our own
+    // AppUserModelID, which works in dev too, and brings the window forward when
+    // clicked. Fall through to the plugin if it fails. Other platforms use the
+    // plugin directly (the OS focuses the app on click on its own).
+    #[cfg(windows)]
+    {
+        let app_click = app.clone();
+        if toast::show(&title, &body, move || {
+            activate_from_notification(&app_click, tab)
+        })
+        .is_ok()
+        {
+            return;
+        }
+    }
+    let _ = tab;
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
+/// Bring the main window forward when a notification is clicked, and — if the
+/// finished run was for a single connection — ask the frontend to switch to that
+/// tab. Runs the window/emit work on the main thread (the toast callback fires on
+/// a WinRT thread).
+#[allow(dead_code)] // only wired from the Windows toast path
+fn activate_from_notification(app: &AppHandle, tab: Option<u32>) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        show_main_window(&handle);
+        if let Some(id) = tab {
+            let _ = handle.emit("notification://activate", id);
+        }
+    });
+}
+
+/// Read a UTF-8 text file (used to import a user-picked FileZilla site export).
+#[tauri::command]
+fn read_text_file(path: String) -> BackendResult<String> {
+    std::fs::read_to_string(&path).map_err(|e| BackendError::Other(e.to_string()))
+}
+
+/// Build an `op` (1Password CLI) command, suppressing the console window that
+/// would otherwise flash on Windows when a GUI app spawns a console process.
+fn op_command() -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut cmd = std::process::Command::new("op");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
+/// Whether the 1Password CLI (`op`) is available on PATH (so the Site Manager
+/// can warn upfront when the "1Password" logon type won't work).
+#[tauri::command]
+fn op_available() -> bool {
+    op_command()
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Resolve a 1Password secret reference (`op://vault/item/field`) to its value
+/// via the user's `op` CLI. The reference is a pointer (safe to store); the
+/// resolved value is returned for immediate use and never logged or persisted.
+#[tauri::command]
+fn resolve_op_reference(reference: String) -> Result<String, String> {
+    // 1Password's "Copy Secret Reference" wraps the value in quotes — strip any
+    // surrounding quotes/whitespace so a pasted reference works as-is.
+    let reference = reference
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'')
+        .trim();
+    if !reference.starts_with("op://") {
+        return Err("Enter a 1Password reference like op://Vault/Item/password.".into());
+    }
+    let output = op_command()
+        .arg("read")
+        .arg(reference)
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "1Password CLI (op) isn't installed or isn't on your PATH.".to_string()
+            } else {
+                format!("Couldn't run the 1Password CLI: {e}")
+            }
+        })?;
+    if output.status.success() {
+        // `op read` appends a trailing newline; strip only newlines (a password
+        // could legitimately end in other whitespace).
+        let value = String::from_utf8_lossy(&output.stdout);
+        Ok(value.trim_end_matches(['\r', '\n']).to_string())
+    } else {
+        Err(friendly_op_error(&String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+/// Turn `op`'s stderr into a short message. The not-installed / not-signed-in
+/// cases get actionable rewording; everything else surfaces `op`'s own message
+/// (it names the exact problem — bad vault/item/section/field), which is far more
+/// useful for fixing a reference than a generic "not found".
+fn friendly_op_error(stderr: &str) -> String {
+    let s = stderr.trim();
+    let low = s.to_lowercase();
+    if low.contains("not currently signed in")
+        || low.contains("no account")
+        || low.contains("account is not signed in")
+        || low.contains("sign in")
+        || low.contains("authorization")
+    {
+        "Not signed in to 1Password. Unlock the 1Password app (or run `op signin`) and try again."
+            .into()
+    } else if s.is_empty() {
+        "1Password couldn't resolve that reference.".into()
+    } else {
+        format!("1Password: {}", clean_op_line(s.lines().next().unwrap_or(s)))
+    }
+}
+
+/// Strip `op`'s `[ERROR] YYYY/MM/DD HH:MM:SS` log prefix from a line, leaving the
+/// human-readable message.
+fn clean_op_line(line: &str) -> &str {
+    let mut s = line.trim();
+    if s.starts_with('[') {
+        if let Some(i) = s.find("] ") {
+            s = s[i + 2..].trim_start();
+        }
+    }
+    // Drop a leading date + time token pair (e.g. "2026/07/01 12:00:00 ").
+    let mut it = s.splitn(3, ' ');
+    if let (Some(a), Some(b), Some(rest)) = (it.next(), it.next(), it.next()) {
+        if a.contains('/') && b.contains(':') {
+            return rest.trim_start();
+        }
+    }
+    s
+}
+
+/// An available update, surfaced to the frontend's "update available" prompt.
+#[derive(Serialize)]
+struct UpdateInfo {
+    version: String,
+    notes: Option<String>,
+}
+
+/// Check the configured update endpoint. Returns `Some` when a newer signed
+/// release is available, `None` when up to date. Errors (no updater config in
+/// dev, offline) are returned as strings and treated as "no update" by the UI.
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    match updater.check().await.map_err(|e| e.to_string())? {
+        Some(update) => Ok(Some(UpdateInfo {
+            version: update.version.clone(),
+            notes: update.body.clone(),
+        })),
+        None => Ok(None),
+    }
+}
+
+/// Download and install the available update, then restart into it. Re-checks so
+/// it needs no shared state between commands.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
+        return Ok(()); // nothing to install
+    };
+    update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+    // `restart()` diverges (returns `!`) — process relaunches into the update.
+    app.restart()
+}
+
 /// Whether closing the window hides it to the system tray instead of quitting.
 /// Set from the frontend setting via [`set_close_to_tray`] and read in the
 /// window's close handler. A module-level flag so the close closure can read it
@@ -544,6 +749,8 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Persist window size/position/maximized across launches. VISIBLE is
         // excluded so close-to-tray's hide() doesn't persist a "hidden" state
         // and launch the app invisibly next time. (The plugin stores its file in
@@ -564,6 +771,10 @@ pub fn run() {
                 next_id: AtomicU32::new(1),
                 transfers,
             });
+            // Register our Windows toast identity (name + icon) up front so the
+            // first notification already attributes to Packetboat.
+            #[cfg(windows)]
+            toast::prepare();
             setup_tray(app.handle())?;
             // Close-to-tray: when the setting is on, the window's X button hides
             // to the tray instead of quitting. Window geometry is persisted by
@@ -595,6 +806,7 @@ pub fn run() {
             local_roots,
             enqueue_transfer,
             cancel_transfer,
+            set_transfer_limits,
             put_bytes,
             local_mkdir,
             local_remove,
@@ -606,6 +818,12 @@ pub fn run() {
             sites_save,
             app_version,
             is_dev,
+            notify,
+            read_text_file,
+            op_available,
+            resolve_op_reference,
+            check_update,
+            install_update,
             set_close_to_tray,
             secret_set,
             secret_get,

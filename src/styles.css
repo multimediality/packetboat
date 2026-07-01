@@ -731,6 +731,23 @@ input[type="number"]::-webkit-inner-spin-button {
   overflow-y: auto;
   min-height: 0;
   background: var(--pb-bg);
+  position: relative; /* positioning context for the marquee */
+}
+
+/* Focusable for type-ahead, but the selected row shows the state — no need for a
+   ring around the whole list. */
+.list-body:focus,
+.list-body:focus-visible {
+  outline: none;
+}
+
+/* Rubber-band (drag) selection rectangle. */
+.marquee {
+  position: absolute;
+  border: 1px solid var(--accent);
+  background: rgba(59, 130, 246, 0.15);
+  pointer-events: none;
+  z-index: 5;
 }
 
 .row {
@@ -1046,6 +1063,132 @@ input[type="number"]::-webkit-inner-spin-button {
   margin-top: 4px;
 }
 
+/* ---------- Settings modal (tabbed + scrollable) ---------- */
+/* Wider than the base modal so the two-up transfer fields keep their labels on
+   one line; cap the height so a small window still shows the header/tabs/Done
+   button, with the section content scrolling inside instead of off-screen. */
+.modal-settings {
+  width: 480px;
+  gap: 12px;
+  min-width: 380px;
+  min-height: 320px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  resize: both;
+  overflow: hidden;
+}
+
+/* Bottom-align the two-up rows so the inputs stay level even if a label wraps
+   to two lines when the modal is squeezed narrow. */
+.settings-section .field-row {
+  align-items: flex-end;
+}
+
+.settings-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-tab {
+  appearance: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  padding: 7px 14px;
+  margin-bottom: -1px;
+  cursor: pointer;
+}
+
+.settings-tab:hover {
+  color: var(--text);
+}
+
+.settings-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+/* The scrolling region between the tabs and the Done button. The negative
+   margin + padding let the scrollbar sit at the modal edge while keeping the
+   fields (and their focus rings) clear of it. */
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 0 -6px;
+  padding: 2px 6px;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.settings-section[hidden] {
+  display: none;
+}
+
+/* Updates tab: manual "Check now" row + inline status. */
+.update-check-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.update-last {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.update-status {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.update-status[hidden] {
+  display: none;
+}
+
+.update-status.muted {
+  color: var(--muted);
+}
+
+.update-status.success {
+  color: var(--ok);
+}
+
+.update-msg {
+  margin: 0;
+}
+
+.update-notes {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
+.update-install {
+  align-self: flex-start;
+}
+
 /* ---------- Scrollbars ---------- */
 .list-body::-webkit-scrollbar {
   width: 11px;
@@ -1152,12 +1295,67 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 
 .q-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 14px;
+  font-size: 13px;
+}
+
+/* Line 1: direction, name, size, progress, status, actions. */
+.q-head {
   display: grid;
   grid-template-columns: 16px 1fr 80px 120px 96px 52px;
   align-items: center;
   gap: 10px;
-  padding: 6px 14px;
-  font-size: 13px;
+}
+
+/* Line 2 (FileZilla-style): server · local path → remote path. */
+.q-paths {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-left: 26px; /* align under the name, past the 16px dir + 10px gap */
+  font-size: 11px;
+  color: var(--faint);
+  min-width: 0;
+}
+
+.q-server {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.q-server:not(:empty)::after {
+  content: " ·";
+  color: var(--faint);
+}
+
+.q-route {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  font-family: var(--pb-font-data);
+}
+
+.q-local,
+.q-remote {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.q-arrow {
+  flex: none;
+  color: var(--accent-soft);
 }
 
 .q-size {
@@ -1509,6 +1707,20 @@ input[type="number"]::-webkit-inner-spin-button {
   padding: 6px;
 }
 
+/* 1Password reference field: Test sits inline to the right of the input (via
+   .dir-input), and the result line sits below it. */
+#site-op-field .op-result {
+  margin: 0; /* the .field's own gap handles spacing (beats .hint's negative margin) */
+}
+
+.op-result.ok {
+  color: var(--ok);
+}
+
+.op-result.err {
+  color: var(--danger);
+}
+
 .sites-form {
   display: flex;
   flex-direction: column;
@@ -1571,6 +1783,26 @@ input[type="number"]::-webkit-inner-spin-button {
 /* ---------- File-exists conflict prompt ---------- */
 .modal-conflict {
   width: 480px;
+  min-width: 360px;
+  min-height: 300px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  resize: both;
+  overflow: hidden;
+}
+
+/* Scroll region between a dialog's fixed title and its pinned action buttons —
+   so the modal can be resized (or hit a small window) without clipping. Mirrors
+   .settings-body. */
+.dialog-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 0 -6px;
+  padding: 2px 6px;
 }
 
 .conflict-files {
@@ -1613,6 +1845,12 @@ input[type="number"]::-webkit-inner-spin-button {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* "Remember this choice" scope select in the conflict prompt. */
+.cf-scope {
+  width: auto;
+  flex: none;
 }
 
 .hint {

@@ -22,6 +22,10 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 # Persist window size/position/maximized across launches.
 tauri-plugin-window-state = "2"
+# Desktop notifications (transfer-complete / failure alerts).
+tauri-plugin-notification = "2"
+# In-app auto-update (checks a GitHub-hosted manifest; installs signed updates).
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -61,3 +65,12 @@ opendal = { version = "0.57", features = ["services-s3", "services-webdav", "ser
 # OS keychain for saved-site passwords (Windows Credential Manager / macOS
 # Keychain / Linux Secret Service — the native stores are on by default).
 keyring = "4"
+
+# Windows-only: branded toast notifications. The notification plugin only sets
+# our app id for the installed build, so unpackaged/dev toasts show as
+# "PowerShell" with no icon. We register our own AppUserModelID (display name +
+# icon) and send toasts under it so they attribute to Packetboat everywhere.
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification = "0.7"
+winreg = "0.55"
+windows-sys = { version = "0.59", features = ["Win32_UI_Shell"] }

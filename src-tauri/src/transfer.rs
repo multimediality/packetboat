@@ -5,14 +5,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{async_runtime, AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Notify};
 
 use crate::backend::{local::LocalBackend, BackendError, BackendResult, StorageBackend};
 
@@ -30,8 +30,14 @@ const CHUNK: usize = 128 * 1024;
 const PROGRESS_STEP: u64 = 512 * 1024;
 
 /// How many times to automatically retry a transfer that fails with a transient
-/// (connection-like) error before giving up.
-const MAX_RETRIES: u32 = 2;
+/// (connection-like) error before giving up. Set fairly high because some
+/// servers are flaky on the data connection (intermittent 451s), and a retry
+/// almost always succeeds.
+const MAX_RETRIES: u32 = 4;
+
+/// If a single read or write makes no progress for this long, the transfer is
+/// treated as stalled and fails (rather than hanging the queue forever).
+const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How a single transfer attempt ended.
 enum Outcome {
@@ -78,6 +84,13 @@ enum Update {
         name: String,
         direction: Direction,
         size: u64,
+        /// Source path (remote for downloads, local for uploads) and destination
+        /// directory — so the queue UI can show the full local + remote paths.
+        src: String,
+        dst_dir: String,
+        /// The remote connection this transfer belongs to, so the queue can label
+        /// each row with its server.
+        connection_id: u32,
     },
     Start {
         id: u64,
@@ -92,6 +105,8 @@ enum Update {
         id: u64,
         attempt: u32,
         max: u32,
+        /// The error that triggered the retry, surfaced to the log.
+        message: String,
     },
     Done {
         id: u64,
@@ -105,7 +120,67 @@ enum Update {
     },
 }
 
-/// Owns the queue. Jobs are processed one at a time by a background worker.
+/// Runtime concurrency limits (settable from the frontend). A dispatcher pulls
+/// queued jobs and runs up to `max` at once, respecting the per-direction caps.
+struct Limits {
+    max: AtomicUsize,    // overall simultaneous transfers (>= 1)
+    max_dl: AtomicUsize, // per-direction cap; 0 = unlimited
+    max_ul: AtomicUsize,
+    active: AtomicUsize,
+    active_dl: AtomicUsize,
+    active_ul: AtomicUsize,
+    slot_freed: Notify, // wakes the dispatcher when a slot frees or a limit rises
+}
+
+impl Limits {
+    fn new() -> Self {
+        Self {
+            max: AtomicUsize::new(2), // FileZilla's default
+            max_dl: AtomicUsize::new(0),
+            max_ul: AtomicUsize::new(0),
+            active: AtomicUsize::new(0),
+            active_dl: AtomicUsize::new(0),
+            active_ul: AtomicUsize::new(0),
+            slot_freed: Notify::new(),
+        }
+    }
+
+    fn set(&self, max: usize, dl: usize, ul: usize) {
+        self.max.store(max.max(1), Ordering::Relaxed);
+        self.max_dl.store(dl, Ordering::Relaxed);
+        self.max_ul.store(ul, Ordering::Relaxed);
+        self.slot_freed.notify_one(); // a raised limit may open slots
+    }
+
+    fn dir_counters(&self, dir: Direction) -> (&AtomicUsize, &AtomicUsize) {
+        match dir {
+            Direction::Download => (&self.active_dl, &self.max_dl),
+            Direction::Upload => (&self.active_ul, &self.max_ul),
+        }
+    }
+
+    fn has_slot(&self, dir: Direction) -> bool {
+        if self.active.load(Ordering::Relaxed) >= self.max.load(Ordering::Relaxed) {
+            return false;
+        }
+        let (active, max) = self.dir_counters(dir);
+        let m = max.load(Ordering::Relaxed);
+        m == 0 || active.load(Ordering::Relaxed) < m
+    }
+
+    fn acquire(&self, dir: Direction) {
+        self.active.fetch_add(1, Ordering::Relaxed);
+        self.dir_counters(dir).0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn release(&self, dir: Direction) {
+        self.active.fetch_sub(1, Ordering::Relaxed);
+        self.dir_counters(dir).0.fetch_sub(1, Ordering::Relaxed);
+        self.slot_freed.notify_one();
+    }
+}
+
+/// Owns the queue. A dispatcher runs jobs concurrently up to the current limits.
 pub struct TransferManager {
     app: AppHandle,
     tx: mpsc::UnboundedSender<(u64, TransferRequest)>,
@@ -113,55 +188,35 @@ pub struct TransferManager {
     /// Ids the user has asked to cancel — checked when a job is pulled (queued)
     /// and on each chunk (running).
     cancel: Arc<StdMutex<HashSet<u64>>>,
+    limits: Arc<Limits>,
 }
 
 impl TransferManager {
-    /// Spawn the worker and return a handle for enqueuing.
+    /// Spawn the dispatcher and return a handle for enqueuing.
     pub fn start(app: AppHandle, connections: Connections) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<(u64, TransferRequest)>();
         let cancel: Arc<StdMutex<HashSet<u64>>> = Arc::new(StdMutex::new(HashSet::new()));
-        let worker_app = app.clone();
-        let worker_cancel = cancel.clone();
+        let limits = Arc::new(Limits::new());
+        let d_app = app.clone();
+        let d_cancel = cancel.clone();
+        let d_limits = limits.clone();
         async_runtime::spawn(async move {
             while let Some((id, req)) = rx.recv().await {
-                // Cancelled while still sitting in the queue?
-                if take_cancel(&worker_cancel, id) {
-                    emit(&worker_app, Update::Cancelled { id });
-                    continue;
+                let dir = req.direction;
+                // Wait for a free slot for this transfer's direction, then run it
+                // concurrently so other transfers keep flowing.
+                while !d_limits.has_slot(dir) {
+                    d_limits.slot_freed.notified().await;
                 }
-                emit(&worker_app, Update::Start { id });
-
-                let mut attempt = 0u32;
-                let result = loop {
-                    match run(&worker_app, &connections, id, &req, &worker_cancel).await {
-                        Ok(Outcome::Done) => break Update::Done { id },
-                        Ok(Outcome::Cancelled) => break Update::Cancelled { id },
-                        Err(e) if attempt < MAX_RETRIES && is_retryable(&e) => {
-                            attempt += 1;
-                            emit(
-                                &worker_app,
-                                Update::Retry {
-                                    id,
-                                    attempt,
-                                    max: MAX_RETRIES,
-                                },
-                            );
-                            tokio::time::sleep(Duration::from_millis(700 * attempt as u64)).await;
-                            if take_cancel(&worker_cancel, id) {
-                                break Update::Cancelled { id };
-                            }
-                        }
-                        Err(e) => {
-                            break Update::Error {
-                                id,
-                                message: e.to_string(),
-                            }
-                        }
-                    }
-                };
-                // Drop any lingering cancel request now the job is finished.
-                worker_cancel.lock().unwrap().remove(&id);
-                emit(&worker_app, result);
+                d_limits.acquire(dir);
+                let app = d_app.clone();
+                let cancel = d_cancel.clone();
+                let limits = d_limits.clone();
+                let conns = connections.clone();
+                tokio::spawn(async move {
+                    run_one(&app, &conns, id, req, &cancel).await;
+                    limits.release(dir);
+                });
             }
         });
         Self {
@@ -169,7 +224,13 @@ impl TransferManager {
             tx,
             next_id: AtomicU64::new(1),
             cancel,
+            limits,
         }
+    }
+
+    /// Apply new concurrency limits (overall max, per-direction caps; 0 = none).
+    pub fn set_limits(&self, max: usize, downloads: usize, uploads: usize) {
+        self.limits.set(max, downloads, uploads);
     }
 
     /// Add a transfer to the queue and return its id.
@@ -182,6 +243,9 @@ impl TransferManager {
                 name: req.name.clone(),
                 direction: req.direction,
                 size: req.size,
+                src: req.src.clone(),
+                dst_dir: req.dst_dir.clone(),
+                connection_id: req.connection_id,
             },
         );
         let _ = self.tx.send((id, req));
@@ -197,6 +261,56 @@ impl TransferManager {
 /// Remove `id` from the cancel set, returning whether it was present.
 fn take_cancel(cancel: &StdMutex<HashSet<u64>>, id: u64) -> bool {
     cancel.lock().unwrap().remove(&id)
+}
+
+/// Process one transfer end to end: emit Start, run with retry/backoff, then
+/// emit the final result. Run concurrently by the dispatcher.
+async fn run_one(
+    app: &AppHandle,
+    connections: &Connections,
+    id: u64,
+    req: TransferRequest,
+    cancel: &Arc<StdMutex<HashSet<u64>>>,
+) {
+    // Cancelled while still sitting in the queue?
+    if take_cancel(cancel, id) {
+        emit(app, Update::Cancelled { id });
+        return;
+    }
+    emit(app, Update::Start { id });
+    let mut attempt = 0u32;
+    let result = loop {
+        match run(app, connections, id, &req, cancel).await {
+            Ok(Outcome::Done) => break Update::Done { id },
+            Ok(Outcome::Cancelled) => break Update::Cancelled { id },
+            Err(e) if attempt < MAX_RETRIES && is_retryable(&e) => {
+                attempt += 1;
+                let message = e.to_string();
+                eprintln!("[transfer {id}] attempt {attempt} failed (retrying): {message}");
+                emit(
+                    app,
+                    Update::Retry {
+                        id,
+                        attempt,
+                        max: MAX_RETRIES,
+                        message,
+                    },
+                );
+                tokio::time::sleep(Duration::from_millis(700 * attempt as u64)).await;
+                if take_cancel(cancel, id) {
+                    break Update::Cancelled { id };
+                }
+            }
+            Err(e) => {
+                let message = e.to_string();
+                eprintln!("[transfer {id}] failed: {message}");
+                break Update::Error { id, message };
+            }
+        }
+    };
+    // Drop any lingering cancel request now the job is finished.
+    cancel.lock().unwrap().remove(&id);
+    emit(app, result);
 }
 
 /// Heuristic: which failures are worth an automatic retry — transient,
@@ -215,6 +329,10 @@ fn is_retryable(e: &BackendError) -> bool {
         " eof",
         "421",
         "temporar",
+        // A stalled transfer retries: the stalled attempt's pooled connection is
+        // dropped, so the retry runs on a fresh connection, which often clears a
+        // server-side lock (e.g. re-uploading a file just downloaded).
+        "stall",
     ]
     .iter()
     .any(|p| m.contains(p))
@@ -272,14 +390,16 @@ async fn run(
     let mut transferred = req.resume_offset.unwrap_or(0);
     let mut last_emit = 0u64;
     loop {
-        if cancel.lock().unwrap().contains(&id) {
-            return Ok(Outcome::Cancelled);
-        }
-        let n = reader.read(&mut buf).await?;
+        let n = match guarded(reader.read(&mut buf), id, cancel).await? {
+            Some(n) => n,
+            None => return Ok(Outcome::Cancelled),
+        };
         if n == 0 {
             break;
         }
-        writer.write_all(&buf[..n]).await?;
+        if guarded(writer.write_all(&buf[..n]), id, cancel).await?.is_none() {
+            return Ok(Outcome::Cancelled);
+        }
         transferred += n as u64;
         if transferred - last_emit >= PROGRESS_STEP {
             last_emit = transferred;
@@ -293,8 +413,19 @@ async fn run(
             );
         }
     }
-    writer.flush().await?;
-    writer.shutdown().await?;
+    if guarded(
+        async {
+            writer.flush().await?;
+            writer.shutdown().await
+        },
+        id,
+        cancel,
+    )
+    .await?
+    .is_none()
+    {
+        return Ok(Outcome::Cancelled);
+    }
 
     emit(
         app,
@@ -305,4 +436,32 @@ async fn run(
         },
     );
     Ok(Outcome::Done)
+}
+
+/// Drive an I/O future while staying responsive to cancellation and bailing if
+/// it stalls. Polls the op in short slices: returns `Ok(Some(v))` when it
+/// completes, `Ok(None)` if the user cancelled, or `Err` if it made no progress
+/// for [`STALL_TIMEOUT`] (which prevents a dead connection hanging the queue).
+async fn guarded<T>(
+    op: impl std::future::Future<Output = std::io::Result<T>>,
+    id: u64,
+    cancel: &StdMutex<HashSet<u64>>,
+) -> BackendResult<Option<T>> {
+    tokio::pin!(op);
+    let start = std::time::Instant::now();
+    loop {
+        if cancel.lock().unwrap().contains(&id) {
+            return Ok(None);
+        }
+        match tokio::time::timeout(Duration::from_millis(150), op.as_mut()).await {
+            Ok(r) => return Ok(Some(r?)),
+            Err(_) => {
+                if start.elapsed() >= STALL_TIMEOUT {
+                    return Err(BackendError::Other(
+                        "transfer stalled: no data moved for 60s".into(),
+                    ));
+                }
+            }
+        }
+    }
 }

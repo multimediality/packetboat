@@ -102,6 +102,54 @@ installers for Windows, macOS (Intel + Apple Silicon), and Linux to a draft
 GitHub release. Bump the version in `package.json`, `src-tauri/tauri.conf.json`,
 and `src-tauri/Cargo.toml` before tagging.
 
+### Local builds
+
+`npm run build` (`tauri build`) produces the installers under
+`src-tauri/target/release/bundle/{msi,nsis}/` plus the portable
+`target/release/packetboat.exe`. The NASM requirement for the crypto backend is
+already handled by [`src-tauri/.cargo/config.toml`](src-tauri/.cargo/config.toml).
+
+Because `createUpdaterArtifacts` is enabled, a build signs the updater bundle and
+therefore needs the signing key + password in the environment. On Windows,
+**`npm run build:local`** ([scripts/build-local.ps1](scripts/build-local.ps1))
+handles that: it loads the private key from `.tauri/packetboat.key` and resolves
+the password without exposing it, trying, in order — the
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` env var, **1Password** (`op read` of
+`$env:PACKETBOAT_OP_PASSWORD_REF`, default `op://Development/Packetboat/h45hpkrdaxawvnuhnk62iutvge`),
+a gitignored `.tauri/packetboat.key.pass` file, then an interactive prompt. When
+`$env:OP_SERVICE_ACCOUNT_TOKEN` is set (a user-scope env var, e.g. in
+`HKCU\Environment`), `op` authenticates with it automatically — no biometric
+prompt; otherwise it falls back to your signed-in 1Password desktop-app session.
+Override `PACKETBOAT_OP_PASSWORD_REF` for a different item (or edit the default
+in [scripts/signing-key.ps1](scripts/signing-key.ps1)). CI signs from GitHub
+secrets and doesn't use this script.
+
+## Auto-updates
+
+Packetboat can check for updates automatically and prompt to install. **Settings
+→ Updates** exposes a toggle to check automatically, a frequency (on every
+launch / daily / weekly / monthly), and a **Check now** button for an on-demand
+check. It uses the [Tauri updater](https://tauri.app/plugin/updater/): the app
+fetches a signed `latest.json` from the latest GitHub release and verifies the
+update signature against a public key baked into the build. **One-time setup
+before this works:**
+
+1. Generate a signing keypair (keep the private key safe — it can't be
+   recovered):
+   ```sh
+   npm run tauri signer generate -- -w packetboat.key
+   ```
+2. Put the **public** key in `src-tauri/tauri.conf.json` under
+   `plugins.updater.pubkey` (replacing the `REPLACE_WITH_…` placeholder).
+3. Add the **private** key and its password as GitHub Actions repository
+   secrets named `TAURI_SIGNING_PRIVATE_KEY` and
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+
+With `bundle.createUpdaterArtifacts` enabled, the release workflow then signs
+each build and publishes `latest.json` alongside the installers, so tagged
+releases are picked up automatically. Until the key is set, the update check
+simply no-ops.
+
 ## License
 
 Packetboat is licensed under the **GNU General Public License v3.0 or later**

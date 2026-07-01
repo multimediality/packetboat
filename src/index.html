@@ -191,6 +191,7 @@
             <div class="sites-list-actions">
               <button type="button" class="btn" id="site-new">New site</button>
               <button type="button" class="btn" id="site-delete">Delete</button>
+              <button type="button" class="btn" id="site-import" title="Import sites from a FileZilla XML export">Import…</button>
             </div>
           </div>
           <div class="sites-form">
@@ -248,6 +249,7 @@
                   <option value="normal">Normal — save username and password</option>
                   <option value="ask">Ask for password — save username only</option>
                   <option value="anonymous">Anonymous</option>
+                  <option value="1password">1Password — resolve a secret reference</option>
                 </select>
               </label>
               <label class="field">
@@ -257,6 +259,20 @@
               <label class="field">
                 <span>Password</span>
                 <input id="site-pass" type="password" autocomplete="off" />
+              </label>
+              <label class="field" id="site-op-field" hidden>
+                <span>1Password secret reference</span>
+                <div class="dir-input">
+                  <input
+                    id="site-op-reference"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="op://Vault/Item/password"
+                  />
+                  <button type="button" class="btn" id="site-op-test">Test</button>
+                </div>
+                <span class="hint op-result" id="site-op-result"></span>
               </label>
               <p class="hint" id="site-logon-hint"></p>
             </div>
@@ -296,64 +312,148 @@
     </div>
     <!-- Settings -->
     <div class="modal-backdrop" id="settings-modal" hidden>
-      <div class="modal modal-sm">
+      <div class="modal modal-settings">
         <h2>Settings</h2>
-        <label class="field">
-          <span>Theme</span>
-          <select id="set-theme">
-            <option value="dark">Dark</option>
-            <option value="light">Light</option>
-            <option value="system">Match system</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>When already connected to a server</span>
-          <select id="set-onconnect">
-            <option value="ask">Ask each time</option>
-            <option value="new-tab">Open in a new tab</option>
-            <option value="replace">Replace the current tab</option>
-          </select>
-        </label>
-        <label class="field-toggle">
-          <span>Show message log</span>
-          <input type="checkbox" class="switch" id="set-show-log" />
-        </label>
-        <label class="field-toggle">
-          <span>Show transfer queue</span>
-          <input type="checkbox" class="switch" id="set-show-queue" />
-        </label>
-        <label class="field-toggle">
-          <span>Close to system tray</span>
-          <input type="checkbox" class="switch" id="set-close-to-tray" />
-        </label>
-        <p class="hint">
-          When on, closing the window keeps Packetboat running in the system tray
-          instead of quitting. Reopen it from the tray icon.
-        </p>
-        <label class="field">
-          <span>When a download's target file exists</span>
-          <select id="set-conflict-download">
-            <option value="ask">Ask each time</option>
-            <option value="overwrite">Overwrite</option>
-            <option value="newer">Overwrite if source is newer</option>
-            <option value="size">Overwrite if size differs</option>
-            <option value="resume">Resume the transfer</option>
-            <option value="rename">Rename (keep both)</option>
-            <option value="skip">Skip</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>When an upload's target file exists</span>
-          <select id="set-conflict-upload">
-            <option value="ask">Ask each time</option>
-            <option value="overwrite">Overwrite</option>
-            <option value="newer">Overwrite if source is newer</option>
-            <option value="size">Overwrite if size differs</option>
-            <option value="resume">Resume the transfer</option>
-            <option value="rename">Rename (keep both)</option>
-            <option value="skip">Skip</option>
-          </select>
-        </label>
+        <div class="settings-tabs" role="tablist">
+          <button type="button" class="settings-tab active" data-settings-tab="general" role="tab">
+            General
+          </button>
+          <button type="button" class="settings-tab" data-settings-tab="transfers" role="tab">
+            Transfers
+          </button>
+          <button type="button" class="settings-tab" data-settings-tab="updates" role="tab">
+            Updates
+          </button>
+        </div>
+        <div class="settings-body">
+          <section class="settings-section" data-settings-section="general">
+            <label class="field">
+              <span>Theme</span>
+              <select id="set-theme">
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+                <option value="system">Match system</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>When already connected to a server</span>
+              <select id="set-onconnect">
+                <option value="ask">Ask each time</option>
+                <option value="new-tab">Open in a new tab</option>
+                <option value="replace">Replace the current tab</option>
+              </select>
+            </label>
+            <label class="field-toggle">
+              <span>Show message log</span>
+              <input type="checkbox" class="switch" id="set-show-log" />
+            </label>
+            <label class="field-toggle">
+              <span>Show transfer queue</span>
+              <input type="checkbox" class="switch" id="set-show-queue" />
+            </label>
+            <label class="field-toggle">
+              <span>Close to system tray</span>
+              <input type="checkbox" class="switch" id="set-close-to-tray" />
+            </label>
+            <p class="hint">
+              When on, closing the window keeps Packetboat running in the system tray
+              instead of quitting. Reopen it from the tray icon.
+            </p>
+            <label class="field-toggle">
+              <span>Desktop notifications</span>
+              <input type="checkbox" class="switch" id="set-notifications" />
+            </label>
+            <p class="hint">
+              Notify when the transfer queue finishes while Packetboat is in the
+              background.
+            </p>
+          </section>
+          <section class="settings-section" data-settings-section="transfers" hidden>
+            <div class="field-row">
+              <label class="field grow">
+                <span>Maximum simultaneous transfers</span>
+                <input type="number" id="set-max-transfers" min="1" max="10" />
+              </label>
+            </div>
+            <div class="field-row">
+              <label class="field grow">
+                <span>Concurrent downloads</span>
+                <input type="number" id="set-max-downloads" min="0" max="10" />
+              </label>
+              <label class="field grow">
+                <span>Concurrent uploads</span>
+                <input type="number" id="set-max-uploads" min="0" max="10" />
+              </label>
+            </div>
+            <p class="hint">
+              How many transfers run at once (0 = no per-direction limit). Raising this
+              opens extra connections to the same server, so keep it modest on shared
+              hosts that limit simultaneous connections.
+            </p>
+            <label class="field">
+              <span>When a download's target file exists</span>
+              <select id="set-conflict-download">
+                <option value="ask">Ask each time</option>
+                <option value="overwrite">Overwrite</option>
+                <option value="newer">Overwrite if source is newer</option>
+                <option value="size">Overwrite if size differs</option>
+                <option value="resume">Resume the transfer</option>
+                <option value="rename">Rename (keep both)</option>
+                <option value="skip">Skip</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>When an upload's target file exists</span>
+              <select id="set-conflict-upload">
+                <option value="ask">Ask each time</option>
+                <option value="overwrite">Overwrite</option>
+                <option value="newer">Overwrite if source is newer</option>
+                <option value="size">Overwrite if size differs</option>
+                <option value="resume">Resume the transfer</option>
+                <option value="rename">Rename (keep both)</option>
+                <option value="skip">Skip</option>
+              </select>
+            </label>
+            <label class="field-toggle">
+              <span>Replace invalid filename characters (downloads)</span>
+              <input type="checkbox" class="switch" id="set-replace-invalid" />
+            </label>
+            <div class="field-row">
+              <label class="field grow">
+                <span>Replace them with</span>
+                <input type="text" id="set-invalid-replacement" maxlength="1" />
+              </label>
+            </div>
+            <p class="hint">
+              Characters Windows forbids in filenames (\ / : * ? " &lt; &gt; |) are
+              swapped when downloading a file whose name uses them.
+            </p>
+          </section>
+          <section class="settings-section" data-settings-section="updates" hidden>
+            <label class="field-toggle">
+              <span>Check for updates automatically</span>
+              <input type="checkbox" class="switch" id="set-update-check" />
+            </label>
+            <label class="field" id="update-interval-field">
+              <span>How often to check</span>
+              <select id="set-update-interval">
+                <option value="launch">On every launch</option>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+              </select>
+            </label>
+            <div class="update-check-row">
+              <button type="button" class="btn" id="set-check-updates">Check now</button>
+              <span class="update-last" id="update-last"></span>
+            </div>
+            <div class="update-status" id="update-status" hidden></div>
+            <p class="hint">
+              Updates install from signed GitHub releases and work only in the
+              installed app.
+            </p>
+          </section>
+        </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-primary" id="settings-close">Done</button>
         </div>

@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",
+    "build:local": "pwsh -ExecutionPolicy Bypass -File scripts/build-local.ps1",
     "tauri": "tauri"
   },
   "devDependencies": {
