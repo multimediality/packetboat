@@ -19,22 +19,31 @@ clean dual-pane client, dark by default and free of adware.
   opportunistic, implicit, or plain) plus a trust-on-first-use prompt for unknown
   or mismatched server certificates, with change detection.
 - **Dual-pane browser** — local ⇄ remote, each with a folder tree and a file
-  list. Tabbed, so several remote connections can be open at once. Optional
-  **synchronized browsing** mirrors navigation between the two panes.
+  list. Tabbed, so several remote connections can be open at once (each tab keeps
+  its own local + remote folder). **Multi-select** (click / Ctrl / Shift / marquee
+  drag) and **type-ahead** (type a name to jump to it). Optional **synchronized
+  browsing** mirrors navigation between the two panes.
 - **Transfers** — a queue that **streams** with live per-file progress (no
-  whole-file buffering). Drag-and-drop between panes, onto folders, and from
-  Explorer; **whole folders transfer recursively**. Interrupted transfers can
-  **resume** (SFTP and FTP both ways, plus cloud downloads).
+  whole-file buffering), running **several at once** (configurable, with per-site
+  connection pooling for FTP). Drag-and-drop between panes, onto folders, and
+  from Explorer; **whole folders transfer recursively**. Interrupted transfers
+  can **resume** (SFTP and FTP both ways, plus cloud downloads).
 - **Conflict handling** — when a file already exists, overwrite, keep the
-  newer / larger, resume, auto-rename, or skip — per transfer or as a saved
-  default for uploads and downloads.
+  newer / larger, resume, auto-rename, or skip — per transfer, for the session,
+  or as a saved default for uploads and downloads.
 - **Connections** — a Quick Connect bar plus a Site Manager with saved sites,
   per-site logon types, and per-service cloud config. Passwords and cloud
   secrets live in the OS keychain (Windows Credential Manager / macOS Keychain /
-  Secret Service) — never the site file.
+  Secret Service) — never the site file. A **1Password** logon type resolves an
+  `op://` secret reference at connect time, and sites **import** from a FileZilla
+  XML export.
+- **Desktop integration** — optional **close-to-system-tray**, **desktop
+  notifications** when the queue finishes in the background (click to open the
+  app), and **auto-updates** from signed GitHub releases (on-launch / daily /
+  weekly / monthly, plus a manual check).
 - **Chrome** — message log, transfer queue, SFTP host-key verification
-  (trust-on-first-use with change detection), and a Settings panel with
-  dark / light / system theming.
+  (trust-on-first-use with change detection), and a Settings panel (General /
+  Transfers / Updates tabs) with dark / light / system theming.
 
 ## Stack
 
@@ -52,21 +61,28 @@ clean dual-pane client, dark by default and free of adware.
 src/                     Frontend (HTML/CSS/JS)
   index.html             Dual-pane shell, dialogs, toolbar
   main.js                UI logic; calls Rust via Tauri commands
+  util.js                Pure helpers (paths/names/references), unit-tested
+  util.test.js           Node test-runner tests for util.js
   styles.css             Layout + app variables (aliased to the theme tokens)
   theme.css              Brand colour tokens (dark + light)
   components.css         Token → component bindings
   fonts.css, fonts/      Self-hosted Sora + Space Mono
   assets/                Logo exports
 src-tauri/
-  src/lib.rs             Tauri commands + app state
-  src/transfer.rs        Streaming transfer queue
+  src/lib.rs             Tauri commands + app state (unit tests at the bottom)
+  src/transfer.rs        Streaming transfer queue + concurrency dispatcher
+  src/toast.rs           Windows-branded toast notifications
   src/backend/mod.rs     StorageBackend trait, Entry types, errors
   src/backend/local.rs   Local filesystem backend
   src/backend/sftp.rs    SFTP (russh + russh-sftp)
-  src/backend/ftp.rs     FTP / FTPS (suppaftp + rustls)
+  src/backend/ftp.rs     FTP / FTPS (suppaftp + rustls) + transfer-connection pool
   src/backend/cloud.rs   Cloud via OpenDAL (S3, B2, WebDAV)
   icons/                 App icon set
   .cargo/config.toml     Windows: prebuilt NASM for the crypto backend
+scripts/                 Build + release helpers
+  version.mjs            Version source of truth (check / set / bump all files)
+  build-local.ps1        Signed local build (injects the updater key + password)
+  signing-key.ps1        Resolves the signing key/password (env / 1Password / file)
 ```
 
 ## Prerequisites
@@ -94,13 +110,37 @@ npm run dev        # tauri dev — launches the app with the Rust backend
 npm run build      # tauri build — produces a native installer
 ```
 
+## Test
+
+```sh
+npm test           # frontend unit tests (Node test runner — src/**/*.test.js)
+npm run test:rust  # backend unit tests (cargo test --lib)
+```
+
+Frontend tests cover the pure helpers in [`src/util.js`](src/util.js) (path/name
+munging, the FileZilla RemoteDir parser, 1Password-reference cleanup). Backend
+tests live alongside their code as `#[cfg(test)]` modules and cover the pure
+helpers that are prone to silent regressions — path conventions, the retry
+heuristic, `Site` config defaults, certificate fingerprinting, and the 1Password
+error/reference parsing.
+
 ## Releases
 
 Pushing a version tag (e.g. `v0.1.0`) triggers the
 [release workflow](.github/workflows/release.yml), which builds and uploads
 installers for Windows, macOS (Intel + Apple Silicon), and Linux to a draft
-GitHub release. Bump the version in `package.json`, `src-tauri/tauri.conf.json`,
-and `src-tauri/Cargo.toml` before tagging.
+GitHub release.
+
+Bump the version with the sync script ([scripts/version.mjs](scripts/version.mjs))
+so `package.json`, `tauri.conf.json`, `Cargo.toml`, and `Cargo.lock` never drift:
+
+```sh
+npm run version:check          # print each file's version + verify they match
+npm run bump -- 0.5.0          # set an explicit version everywhere
+npm run bump -- patch          # or bump patch / minor / major
+```
+
+Then commit and tag: `git tag v0.5.0 && git push --tags`.
 
 ### Local builds
 

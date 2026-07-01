@@ -155,3 +155,25 @@ fn to_dir(path: &str) -> String {
 fn to_file(path: &str) -> String {
     path.trim_start_matches('/').to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{to_dir, to_file};
+
+    #[test]
+    fn to_dir_maps_posix_to_opendal_dir() {
+        assert_eq!(to_dir("/"), "/"); // root
+        assert_eq!(to_dir(""), "/"); // empty is also root
+        assert_eq!(to_dir("/img"), "img/");
+        assert_eq!(to_dir("/img/photos"), "img/photos/");
+        assert_eq!(to_dir("/img/"), "img/"); // trailing slash normalized
+    }
+
+    #[test]
+    fn to_file_strips_leading_slash_only() {
+        assert_eq!(to_file("/img/logo.png"), "img/logo.png");
+        assert_eq!(to_file("logo.png"), "logo.png");
+        // A file name never gets a trailing slash (unlike to_dir).
+        assert_eq!(to_file("/a.txt"), "a.txt");
+    }
+}

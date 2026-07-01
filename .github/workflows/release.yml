@@ -4,8 +4,10 @@ name: Release
 # version tag (e.g. v0.1.0) is pushed. tauri-action bundles each platform's
 # native installers and uploads them to a GitHub release for that tag.
 #
-# Versions to bump before tagging: package.json, src-tauri/tauri.conf.json,
-# and src-tauri/Cargo.toml — then `git tag v0.1.0 && git push origin v0.1.0`.
+# Bump the version before tagging with `npm run bump -- <version>` (keeps
+# package.json, tauri.conf.json, Cargo.toml, and Cargo.lock in sync), then
+# `git tag v0.1.0 && git push origin v0.1.0`. The `verify` job below fails the
+# release if those files drift or the tag doesn't match them.
 
 on:
   push:
@@ -15,7 +17,31 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Fail fast — before any expensive platform builds — if the version files have
+  # drifted out of sync or (on a tag push) the tag doesn't match the version.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Verify version files are in sync
+        run: node scripts/version.mjs
+      - name: Verify the tag matches the version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          FILE_VERSION=$(node -e "process.stdout.write(require('./package.json').version)")
+          if [ "v$FILE_VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match repo version v$FILE_VERSION — bump with 'npm run bump' before tagging."
+            exit 1
+          fi
+          echo "Tag $GITHUB_REF_NAME matches repo version v$FILE_VERSION."
+
   publish:
+    needs: verify
     permissions:
       contents: write # tauri-action needs this to create the release
     strategy:

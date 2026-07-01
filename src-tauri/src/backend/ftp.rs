@@ -972,3 +972,33 @@ fn join_path(base: &str, name: &str) -> String {
         format!("{base}/{name}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{default_encryption, default_passive, default_port, fingerprint_of, join_path};
+
+    #[test]
+    fn fingerprint_is_uppercase_colon_hex_sha256() {
+        // Known SHA-256("abc"), formatted the way the TOFU trust store stores it.
+        assert_eq!(
+            fingerprint_of(b"abc"),
+            "BA:78:16:BF:8F:01:CF:EA:41:41:40:DE:5D:AE:22:23:B0:03:61:A3:96:17:7A:9C:B4:10:FF:61:F2:00:15:AD"
+        );
+        // Distinct inputs → distinct fingerprints; same input → stable.
+        assert_ne!(fingerprint_of(b"abc"), fingerprint_of(b"abd"));
+        assert_eq!(fingerprint_of(b"x"), fingerprint_of(b"x"));
+    }
+
+    #[test]
+    fn ftp_defaults() {
+        assert_eq!(default_port(), 21);
+        assert_eq!(default_encryption(), "explicit");
+        assert!(default_passive());
+    }
+
+    #[test]
+    fn join_path_root() {
+        assert_eq!(join_path("/", "a"), "/a");
+        assert_eq!(join_path("/pub", "a"), "/pub/a");
+    }
+}

@@ -1,6 +1,20 @@
 // Packetboat frontend. Talks to the Rust backend exclusively through Tauri
 // commands (see src-tauri/src/lib.rs). The dark theme lives in styles.css.
 
+// Pure helpers (path/name/reference munging) live in their own module so they
+// can be unit-tested under Node (see util.test.js).
+import {
+  joinPath,
+  relParent,
+  relName,
+  dedupeName,
+  parseFileZillaRemoteDir,
+  pathSep,
+  relativeUnder,
+  joinUnder,
+  normalizeOpRef,
+} from "./util.js";
+
 // Guard the Tauri API so the shell still renders outside a Tauri window
 // (e.g. a plain HTML preview); commands simply error if invoked there.
 const invoke = window.__TAURI__
@@ -458,25 +472,6 @@ function parentPosix(path) {
 // When a connection has sync browsing on, navigating one pane mirrors the move
 // to the other pane, relative to the two root directories anchored at connect.
 let syncing = false; // guard so the mirror navigation doesn't echo back
-
-function pathSep(p) {
-  return p.includes("\\") ? "\\" : "/";
-}
-
-// `path` relative to `root` (compared with forward slashes), or null if `path`
-// isn't under `root`.
-function relativeUnder(path, root) {
-  const np = path.replace(/\\/g, "/").replace(/\/+$/, "");
-  const nr = root.replace(/\\/g, "/").replace(/\/+$/, "");
-  if (np === nr) return "";
-  return np.startsWith(nr + "/") ? np.slice(nr.length + 1) : null;
-}
-
-function joinUnder(root, rel) {
-  if (!rel) return root;
-  const sep = pathSep(root);
-  return root.replace(/[/\\]+$/, "") + sep + rel.split("/").join(sep);
-}
 
 function syncCounterpart(fromSide, path, tab) {
   const [root, otherRoot] =
@@ -1345,30 +1340,6 @@ function decodeBase64(s) {
 // where each path segment is preceded by its character length (so segments may
 // contain spaces). E.g. "1 0 11 public_html 14 learningcarton" → "/public_html/
 // learningcarton". Returns "" for an empty/unparseable value.
-function parseFileZillaRemoteDir(raw) {
-  const s = (raw || "").trim();
-  if (!s) return "";
-  let i = 0;
-  const nextToken = () => {
-    let j = s.indexOf(" ", i);
-    if (j === -1) j = s.length;
-    const tok = s.slice(i, j);
-    i = j + 1;
-    return tok;
-  };
-  nextToken(); // server type (1 = Unix) — ignored
-  const prefixLen = parseInt(nextToken(), 10) || 0;
-  if (prefixLen > 0) i += prefixLen + 1; // skip a server prefix (VMS/MVS), if any
-  const segments = [];
-  while (i < s.length) {
-    const len = parseInt(nextToken(), 10);
-    if (isNaN(len)) break;
-    segments.push(s.slice(i, i + len));
-    i += len + 1;
-  }
-  return segments.length ? "/" + segments.join("/") : "";
-}
-
 // Map one FileZilla <Server> element to a Packetboat site + its password.
 // Returns null for unsupported protocols (Storj, S3, …) or missing host.
 function fileZillaServerToSite(server) {
@@ -1804,12 +1775,6 @@ function setOpResult(text, kind) {
   el.siteOpResult.className = `hint op-result${kind ? ` ${kind}` : ""}`;
 }
 
-// 1Password's "Copy Secret Reference" wraps the value in quotes; strip any
-// surrounding quotes/whitespace so a pasted reference is usable as-is.
-function normalizeOpRef(v) {
-  return v.replace(/^[\s"']+|[\s"']+$/g, "");
-}
-
 // "Test" button: resolve the reference once to confirm it works, without
 // revealing the value.
 async function testOpReference() {
@@ -1990,19 +1955,6 @@ function sanitizeRelPath(rel) {
 }
 
 // Build a non-colliding "name (n).ext" within the destination directory.
-function dedupeName(name, dirMap) {
-  const dot = name.lastIndexOf(".");
-  const base = dot > 0 ? name.slice(0, dot) : name;
-  const ext = dot > 0 ? name.slice(dot) : "";
-  let n = 1;
-  let candidate;
-  do {
-    candidate = `${base} (${n})${ext}`;
-    n += 1;
-  } while (dirMap.has(candidate));
-  return candidate;
-}
-
 // Decide what to do with a file whose target may already exist. Returns
 // { proceed, name, resumeOffset? } — `name` may be a renamed copy, proceed:false
 // means skip, resumeOffset means continue an interrupted transfer from that byte.
@@ -2241,19 +2193,6 @@ async function safeMkdir(cmd, parent, name) {
 
 // Path helpers for building destination paths. Joining with "/" is fine for
 // remote (POSIX) and for local on Windows (the backend normalizes separators).
-function joinPath(base, sub) {
-  if (!sub) return base;
-  return `${base.replace(/[/\\]+$/, "")}/${sub}`;
-}
-function relParent(rel) {
-  const i = rel.lastIndexOf("/");
-  return i < 0 ? "" : rel.slice(0, i);
-}
-function relName(rel) {
-  const i = rel.lastIndexOf("/");
-  return i < 0 ? rel : rel.slice(i + 1);
-}
-
 // Import OS files (dragged in from the file manager) into `destDir` by sending
 // their bytes — the webview can't see their real path, only their content.
 async function importExternalFiles(files, destSide, destDir) {
@@ -3341,7 +3280,7 @@ async function manualCheckUpdate() {
     renderUpdateStatus(info ? { state: "available", info } : { state: "uptodate" });
   } catch (err) {
     console.warn("update check failed:", err);
-    renderUpdateStatus({ state: "error" });
+    renderUpdateStatus({ state: "error", message: String(err) });
   } finally {
     el.checkUpdatesBtn.disabled = false;
   }
@@ -3369,8 +3308,23 @@ function renderUpdateStatus(s) {
       : "You're on the latest version.";
   } else if (s.state === "error") {
     box.classList.add("muted");
-    box.textContent =
-      "Couldn't check for updates. This works only in the installed app, with a network connection.";
+    const detail = (s.message || "").replace(/\s+/g, " ").trim();
+    const low = detail.toLowerCase();
+    if (
+      low.includes("404") ||
+      low.includes("not found") ||
+      low.includes("could not fetch") ||
+      low.includes("no release") ||
+      low.includes("json")
+    ) {
+      // The endpoint 404s until a signed release with latest.json is published.
+      box.textContent =
+        "No published release found yet — the updater starts working once your first signed GitHub release is published (and not left as a draft).";
+    } else if (detail) {
+      box.textContent = `Couldn't check for updates: ${detail}`;
+    } else {
+      box.textContent = "Couldn't check for updates.";
+    }
   } else if (s.state === "available") {
     const msg = document.createElement("p");
     msg.className = "update-msg";

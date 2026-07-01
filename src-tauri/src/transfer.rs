@@ -465,3 +465,35 @@ async fn guarded<T>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::is_retryable;
+    use crate::backend::BackendError;
+
+    #[test]
+    fn transient_errors_retry() {
+        for m in [
+            "connection reset by peer",
+            "operation timed out",
+            "451 Error during read from data connection",
+            "broken pipe",
+            "os error 10054",
+            "421 service not available",
+            "transfer stalled: no data moved for 60s",
+        ] {
+            assert!(is_retryable(&BackendError::Other(m.into())), "should retry: {m}");
+        }
+    }
+
+    #[test]
+    fn permanent_errors_do_not_retry() {
+        for m in [
+            "550 permission denied",
+            "no such file or directory",
+            "authentication failed",
+        ] {
+            assert!(!is_retryable(&BackendError::Other(m.into())), "should not retry: {m}");
+        }
+    }
+}

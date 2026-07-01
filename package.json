@@ -1,7 +1,7 @@
 {
   "name": "packetboat",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A modern, cross-platform file transfer client (FTP-first, cloud-capable).",
   "license": "GPL-3.0-or-later",
   "type": "module",
@@ -9,6 +9,10 @@
     "dev": "tauri dev",
     "build": "tauri build",
     "build:local": "pwsh -ExecutionPolicy Bypass -File scripts/build-local.ps1",
+    "test": "node --test \"src/**/*.test.js\"",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --lib",
+    "version:check": "node scripts/version.mjs",
+    "bump": "node scripts/version.mjs",
     "tauri": "tauri"
   },
   "devDependencies": {

@@ -288,3 +288,16 @@ fn save_known_hosts(path: &std::path::Path, hosts: &std::collections::HashMap<St
         let _ = std::fs::write(path, json);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::join_path;
+
+    #[test]
+    fn join_path_avoids_double_slash_at_root() {
+        assert_eq!(join_path("/", "file.txt"), "/file.txt");
+        assert_eq!(join_path("/home/user", "file.txt"), "/home/user/file.txt");
+        // A base that already ends in a slash isn't doubled.
+        assert_eq!(join_path("/home/user/", "file.txt"), "/home/user/file.txt");
+    }
+}

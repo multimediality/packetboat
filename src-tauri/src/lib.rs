@@ -573,17 +573,24 @@ fn op_available() -> bool {
 /// Resolve a 1Password secret reference (`op://vault/item/field`) to its value
 /// via the user's `op` CLI. The reference is a pointer (safe to store); the
 /// resolved value is returned for immediate use and never logged or persisted.
-#[tauri::command]
-fn resolve_op_reference(reference: String) -> Result<String, String> {
-    // 1Password's "Copy Secret Reference" wraps the value in quotes — strip any
-    // surrounding quotes/whitespace so a pasted reference works as-is.
+/// Strip the surrounding quotes/whitespace 1Password's "Copy Secret Reference"
+/// adds, and verify the result is an `op://` reference. Returns the cleaned
+/// reference ready for `op read`, or a friendly error.
+fn normalize_op_reference(reference: &str) -> Result<&str, String> {
     let reference = reference
         .trim()
         .trim_matches(|c: char| c == '"' || c == '\'')
         .trim();
-    if !reference.starts_with("op://") {
-        return Err("Enter a 1Password reference like op://Vault/Item/password.".into());
+    if reference.starts_with("op://") {
+        Ok(reference)
+    } else {
+        Err("Enter a 1Password reference like op://Vault/Item/password.".into())
     }
+}
+
+#[tauri::command]
+fn resolve_op_reference(reference: String) -> Result<String, String> {
+    let reference = normalize_op_reference(&reference)?;
     let output = op_command()
         .arg("read")
         .arg(reference)
@@ -775,7 +782,11 @@ pub fn run() {
             // first notification already attributes to Packetboat.
             #[cfg(windows)]
             toast::prepare();
-            setup_tray(app.handle())?;
+            // Best-effort: a tray failure must not abort setup, or the window
+            // (which starts hidden) would never be shown below.
+            if let Err(e) = setup_tray(app.handle()) {
+                eprintln!("tray setup failed: {e}");
+            }
             // Close-to-tray: when the setting is on, the window's X button hides
             // to the tray instead of quitting. Window geometry is persisted by
             // the window-state plugin above.
@@ -789,6 +800,13 @@ pub fn run() {
                         }
                     }
                 });
+                // The window starts hidden (visible:false in tauri.conf.json) so
+                // the window-state plugin can restore its saved geometry first;
+                // reveal it now that geometry is set, avoiding the default-size →
+                // restored-size resize flash. The dark backgroundColor covers the
+                // moment before the webview paints, so there's no white flash.
+                let _ = window.show();
+                let _ = window.set_focus();
             }
             Ok(())
         })
@@ -831,4 +849,79 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn op_reference_strips_1password_quotes_and_whitespace() {
+        // 1Password's "Copy Secret Reference" wraps the value in quotes.
+        assert_eq!(
+            normalize_op_reference("\"op://Private/Item/password\"").unwrap(),
+            "op://Private/Item/password"
+        );
+        assert_eq!(
+            normalize_op_reference("'op://Vault/Item/field'").unwrap(),
+            "op://Vault/Item/field"
+        );
+        assert_eq!(
+            normalize_op_reference("   op://Vault/Item/password  ").unwrap(),
+            "op://Vault/Item/password"
+        );
+        // Internal spaces (vault/item/section names) are preserved.
+        assert_eq!(
+            normalize_op_reference("\"op://Development/Shock Hosting/cPanel User/password\"").unwrap(),
+            "op://Development/Shock Hosting/cPanel User/password"
+        );
+    }
+
+    #[test]
+    fn op_reference_rejects_non_op_input() {
+        assert!(normalize_op_reference("just a password").is_err());
+        assert!(normalize_op_reference("https://example.com").is_err());
+        assert!(normalize_op_reference("").is_err());
+    }
+
+    #[test]
+    fn clean_op_line_strips_error_and_timestamp_prefix() {
+        assert_eq!(
+            clean_op_line("[ERROR] 2026/07/01 12:00:00 \"op://x\" isn't an item"),
+            "\"op://x\" isn't an item"
+        );
+        // No log prefix → returned as-is.
+        assert_eq!(clean_op_line("could not read secret"), "could not read secret");
+        // Bracket tag but no timestamp.
+        assert_eq!(clean_op_line("[ERROR] plain message"), "plain message");
+    }
+
+    #[test]
+    fn friendly_op_error_rewords_sign_in_but_surfaces_others() {
+        assert!(friendly_op_error("[ERROR] 2026/07/01 12:00:00 you are not currently signed in")
+            .to_lowercase()
+            .contains("unlock the 1password app"));
+        // A reference/field problem surfaces op's own message rather than a generic one.
+        let msg = friendly_op_error("[ERROR] 2026/07/01 12:00:00 \"op://x/y/z\" isn't an item in the \"y\" vault");
+        assert!(msg.starts_with("1Password:"));
+        assert!(msg.contains("isn't an item"));
+        // Empty stderr → generic fallback.
+        assert!(!friendly_op_error("").is_empty());
+    }
+
+    #[test]
+    fn site_deserializes_with_sensible_defaults() {
+        // A minimal site (older config, or a hand-written entry) must fill in the
+        // defaults the connect flow relies on.
+        let site: Site = serde_json::from_str(
+            r#"{"id":"a","name":"Box","protocol":"sftp","host":"h.example"}"#,
+        )
+        .unwrap();
+        assert_eq!(site.logon_type, "ask");
+        assert!(site.passive); // default true
+        assert_eq!(site.op_reference, "");
+        assert_eq!(site.encryption, "");
+        assert!(!site.sync_browsing);
+        assert!(site.config.is_empty());
+    }
 }
