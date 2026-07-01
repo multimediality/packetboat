@@ -79,6 +79,13 @@ function cacheEls() {
   // Site manager
   el.sitesModal = document.getElementById("sites-modal");
   el.sitesList = document.getElementById("sites-list");
+  el.sitesForm = document.querySelector(".sites-form");
+  el.siteDuplicate = document.getElementById("site-duplicate");
+  el.siteDelete = document.getElementById("site-delete");
+  el.siteExport = document.getElementById("site-export");
+  el.siteExportAll = document.getElementById("site-export-all");
+  el.siteSaveBtn = document.getElementById("site-save");
+  el.siteConnectBtn = document.getElementById("site-connect");
   el.sitesError = document.getElementById("sites-error");
   el.siteName = document.getElementById("site-name");
   el.siteProtocol = document.getElementById("site-protocol");
@@ -1064,7 +1071,13 @@ async function doDisconnect() {
 
 // ---- Site manager ----
 let sites = [];
+// The single "active" site (its form is shown/editable) when exactly one is
+// selected; null when zero or many are selected.
 let selectedSiteId = null;
+// All selected site ids (multi-select via Ctrl/Shift, like the file list), plus
+// the anchor index for Shift-range selection.
+let selectedSiteIds = [];
+let siteAnchorIndex = -1;
 
 function defaultPort(protocol, encryption) {
   if (protocol === "sftp") return 22;
@@ -1238,11 +1251,12 @@ function renderSites() {
     empty.className = "sites-empty";
     empty.textContent = "No saved sites yet.";
     el.sitesList.appendChild(empty);
+    updateSiteButtons();
     return;
   }
-  for (const site of sites) {
+  sites.forEach((site, index) => {
     const item = document.createElement("div");
-    item.className = "site-item" + (site.id === selectedSiteId ? " selected" : "");
+    item.className = "site-item" + (selectedSiteIds.includes(site.id) ? " selected" : "");
     const name = document.createElement("span");
     name.textContent = site.name || site.host || "Untitled";
     const sub = document.createElement("span");
@@ -1252,9 +1266,60 @@ function renderSites() {
       : site.host || "—";
     sub.textContent = `${site.protocol.toUpperCase()} · ${detail}`;
     item.append(name, sub);
-    item.addEventListener("click", () => selectSite(site.id));
+    item.addEventListener("click", (ev) => onSiteClick(index, ev));
     el.sitesList.appendChild(item);
+  });
+}
+
+// Site-list click: plain = single, Ctrl/Cmd = toggle, Shift = range from the
+// anchor — mirrors the file-list multi-select.
+function onSiteClick(index, ev) {
+  const id = sites[index].id;
+  if (ev.ctrlKey || ev.metaKey) {
+    const i = selectedSiteIds.indexOf(id);
+    if (i >= 0) selectedSiteIds.splice(i, 1);
+    else selectedSiteIds.push(id);
+    siteAnchorIndex = index;
+  } else if (ev.shiftKey && siteAnchorIndex >= 0 && siteAnchorIndex < sites.length) {
+    const [a, b] = siteAnchorIndex <= index ? [siteAnchorIndex, index] : [index, siteAnchorIndex];
+    selectedSiteIds = sites.slice(a, b + 1).map((s) => s.id);
+  } else {
+    selectedSiteIds = [id];
+    siteAnchorIndex = index;
   }
+  applySiteSelection();
+}
+
+// Reflect the current selection: a single selection fills + enables the form;
+// zero or many blanks + disables it. Always refreshes the button states.
+function applySiteSelection() {
+  if (selectedSiteIds.length === 1) {
+    selectSite(selectedSiteIds[0]); // fills the form + loads secrets + renders
+  } else {
+    selectedSiteId = null;
+    setSiteFormEnabled(false); // blanks + disables the form
+    updateSiteButtons();
+    renderSites();
+  }
+}
+
+// Enable (single selection) or blank+disable (zero/multi) the editable site form.
+function setSiteFormEnabled(enabled) {
+  if (!enabled) fillSiteForm(null); // clear the fields
+  el.sitesForm.classList.toggle("form-disabled", !enabled);
+  el.sitesForm.querySelectorAll("input, select, button").forEach((c) => {
+    c.disabled = !enabled;
+  });
+}
+
+// Enable/disable the list-action + footer buttons for the current selection.
+function updateSiteButtons() {
+  const n = selectedSiteIds.length;
+  if (el.siteDuplicate) el.siteDuplicate.disabled = n !== 1; // single only
+  if (el.siteDelete) el.siteDelete.disabled = n === 0;
+  if (el.siteExport) el.siteExport.disabled = n === 0;
+  if (el.siteSaveBtn) el.siteSaveBtn.disabled = n !== 1;
+  if (el.siteConnectBtn) el.siteConnectBtn.disabled = n !== 1;
 }
 
 function fillSiteForm(site) {
@@ -1283,8 +1348,13 @@ function fillSiteForm(site) {
 
 async function selectSite(id) {
   selectedSiteId = id;
+  selectedSiteIds = [id];
+  const idx = sites.findIndex((s) => s.id === id);
+  if (idx >= 0) siteAnchorIndex = idx;
+  setSiteFormEnabled(true);
   const site = sites.find((s) => s.id === id);
   fillSiteForm(site);
+  updateSiteButtons();
   renderSites();
   if (!site) return;
   if (isCloud(site.protocol)) {
@@ -1325,6 +1395,44 @@ function newSite() {
   selectSite(id);
 }
 
+function newSiteId() {
+  return (crypto.randomUUID && crypto.randomUUID()) || String(Date.now() + Math.random());
+}
+
+// Duplicate the single selected site (FileZilla-style): a deep copy with a new
+// id and a "(copy)" name, including any keychain secrets (password / cloud keys).
+async function duplicateSite() {
+  if (selectedSiteIds.length !== 1) return;
+  const src = sites.find((s) => s.id === selectedSiteIds[0]);
+  if (!src) return;
+  const copy = JSON.parse(JSON.stringify(src)); // deep copy (config map included)
+  copy.id = newSiteId();
+  const names = new Set(sites.map((s) => s.name));
+  let base = `${src.name || src.host || "Site"} (copy)`;
+  let name = base;
+  let n = 2;
+  while (names.has(name)) name = `${base} ${n++}`;
+  copy.name = name;
+  sites.push(copy);
+  try {
+    await invoke("sites_save", { sites });
+    // Copy the source's keychain secrets to the new id so the duplicate connects.
+    if (isCloud(src.protocol)) {
+      for (const key of cloudSecretKeys(src.protocol)) {
+        const val = await invoke("secret_get", { id: `${src.id}:${key}` }).catch(() => null);
+        if (val) await invoke("secret_set", { id: `${copy.id}:${key}`, password: val });
+      }
+    } else {
+      const pw = await invoke("secret_get", { id: src.id }).catch(() => null);
+      if (pw) await invoke("secret_set", { id: copy.id, password: pw });
+    }
+  } catch (e) {
+    setSitesError(String(e));
+  }
+  selectSite(copy.id);
+  setStatus(`Duplicated site "${src.name || src.host}"`);
+}
+
 // ---- FileZilla import ----
 
 // UTF-8-safe base64 decode for FileZilla's <Pass encoding="base64"> values.
@@ -1334,6 +1442,13 @@ function decodeBase64(s) {
   } catch (_) {
     return "";
   }
+}
+
+// UTF-8-safe base64 encode (for writing FileZilla <Pass encoding="base64">).
+function encodeBase64(s) {
+  let bin = "";
+  new TextEncoder().encode(s).forEach((b) => (bin += String.fromCharCode(b)));
+  return btoa(bin);
 }
 
 // FileZilla serializes <RemoteDir> as "<type> <prefixLen> [<segLen> <segment>]…"
@@ -1390,7 +1505,7 @@ function fileZillaServerToSite(server) {
   return {
     site: {
       id: (crypto.randomUUID && crypto.randomUUID()) || String(Date.now() + Math.random()),
-      name: t("Name") || host,
+      name: t("Name") || fzServerName(server) || host,
       protocol,
       host,
       port: parseInt(t("Port"), 10) || defaultPort(protocol, encryption),
@@ -1413,14 +1528,14 @@ function fileZillaServerToSite(server) {
 // Local/remote default dirs import too (remote dirs are decoded from FileZilla's
 // serialized format). On a name/host/user/protocol collision the user is
 // prompted per site (skip / overwrite / keep both), with an apply-to-all option.
-async function importFileZilla() {
+async function importSites() {
   let path;
   try {
     path = await invoke("plugin:dialog|open", {
       options: {
         multiple: false,
-        title: "Choose a FileZilla site export",
-        filters: [{ name: "FileZilla export", extensions: ["xml"] }],
+        title: "Choose a site export (Packetboat or FileZilla)",
+        filters: [{ name: "Site export", extensions: ["json", "xml"] }],
       },
     });
   } catch (e) {
@@ -1428,31 +1543,68 @@ async function importFileZilla() {
     return;
   }
   if (typeof path !== "string") return; // cancelled
-  let xml;
+  let text;
   try {
-    xml = await invoke("read_text_file", { path });
+    text = await invoke("read_text_file", { path });
   } catch (e) {
     setSitesError(`Couldn't read that file: ${e}`);
     return;
   }
-  const doc = new DOMParser().parseFromString(xml, "application/xml");
-  if (doc.querySelector("parsererror") || !doc.querySelector("FileZilla3")) {
-    setSitesError("That doesn't look like a FileZilla site export.");
+
+  // Detect the format: JSON = Packetboat export (maybe encrypted), XML = FileZilla.
+  // Each parser returns [{ site, password?, cloudSecrets? }], or null.
+  const trimmed = text.trimStart();
+  let imported;
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch (_) {
+      /* not JSON */
+    }
+    if (parsed && parsed.format === "packetboat-sites-encrypted") {
+      // Encrypted Packetboat export — ask for the passphrase and decrypt.
+      const pass = await buildDialog({
+        title: "Encrypted export",
+        label: "Enter the password this export was encrypted with.",
+        input: true,
+        inputType: "password",
+        trim: false,
+        confirmText: "Import",
+      });
+      if (pass === null) return; // cancelled
+      let plain;
+      try {
+        plain = await decryptExport(parsed, pass);
+      } catch (_) {
+        setSitesError("Wrong password, or the file is damaged.");
+        return;
+      }
+      imported = parsePacketboatExport(plain);
+    } else {
+      imported = parsePacketboatExport(text);
+    }
+  } else {
+    imported = parseFileZillaExport(text);
+  }
+  if (!imported) {
+    setSitesError("That isn't a Packetboat or FileZilla site export.");
     return;
   }
+  if (imported.length === 0) {
+    setSitesError("No importable sites found in that file.");
+    return;
+  }
+
+  // Shared apply logic (per-duplicate prompt, then commit after the loop so a
+  // mid-import cancel leaves sites untouched).
   let skipped = 0;
   const added = [];
-  const overwrites = []; // { target: existingSite, data: importedSite }
-  const secrets = []; // { id, password }
-  let applyToAll = null; // once chosen, the action for every remaining duplicate
-  // querySelectorAll("Server") flattens the folder tree — nested sites included.
-  for (const server of doc.querySelectorAll("Server")) {
-    const mapped = fileZillaServerToSite(server);
-    if (!mapped) {
-      skipped++;
-      continue;
-    }
-    const s = mapped.site;
+  const overwrites = []; // { target, data }
+  const secretJobs = []; // { id, password } | { id, secrets: {key:val} }
+  let applyToAll = null;
+  for (const item of imported) {
+    const s = item.site;
     const existing = sites.find(
       (e) =>
         e.protocol === s.protocol &&
@@ -1464,7 +1616,7 @@ async function importFileZilla() {
       let action = applyToAll;
       if (!action) {
         const res = await promptDuplicate(s);
-        if (!res) return; // cancelled — nothing has been applied yet
+        if (!res) return; // cancelled — nothing applied yet
         action = res.action;
         if (res.all) applyToAll = action;
       }
@@ -1474,30 +1626,33 @@ async function importFileZilla() {
       }
       if (action === "overwrite") {
         overwrites.push({ target: existing, data: s });
-        // Only replace the saved password if the import actually carries one.
-        if (mapped.password) secrets.push({ id: existing.id, password: mapped.password });
+        queueImportSecrets(secretJobs, existing.id, item);
         continue;
       }
-      // "keep" → fall through and add as a separate copy (s has a fresh id).
+      // "keep" → add as a separate copy (s already has a fresh id).
     }
     added.push(s);
-    if (mapped.password) secrets.push({ id: s.id, password: mapped.password });
+    queueImportSecrets(secretJobs, s.id, item);
   }
   if (added.length + overwrites.length === 0) {
     setSitesError(`Nothing imported${skipped ? ` — ${skipped} skipped or unsupported` : ""}.`);
     return;
   }
-  // Apply now — after the loop — so a mid-import cancel leaves sites untouched.
-  // Overwrites keep the existing id so the keychain entry stays linked.
   for (const o of overwrites) Object.assign(o.target, o.data, { id: o.target.id });
   sites.push(...added);
   try {
     await invoke("sites_save", { sites });
-    for (const sec of secrets) {
+    for (const job of secretJobs) {
       try {
-        await invoke("secret_set", sec);
+        if (job.secrets) {
+          for (const [k, v] of Object.entries(job.secrets)) {
+            await invoke("secret_set", { id: `${job.id}:${k}`, password: v });
+          }
+        } else if (job.password) {
+          await invoke("secret_set", { id: job.id, password: job.password });
+        }
       } catch (_) {
-        /* a single password failing shouldn't abort the import */
+        /* one secret failing shouldn't abort the import */
       }
     }
   } catch (e) {
@@ -1510,7 +1665,305 @@ async function importFileZilla() {
   if (added.length) parts.push(`${added.length} imported`);
   if (overwrites.length) parts.push(`${overwrites.length} updated`);
   if (skipped) parts.push(`${skipped} skipped`);
-  setStatus(`FileZilla import: ${parts.join(", ")}.`);
+  setStatus(`Import: ${parts.join(", ")}.`);
+}
+
+// Queue the keychain writes for one imported item (cloud secrets or a password).
+function queueImportSecrets(jobs, id, item) {
+  if (item.cloudSecrets && Object.keys(item.cloudSecrets).length) {
+    jobs.push({ id, secrets: item.cloudSecrets });
+  } else if (item.password) {
+    jobs.push({ id, password: item.password });
+  }
+}
+
+// Parse a FileZilla XML export → [{ site, password }], or null if not FileZilla.
+function parseFileZillaExport(xml) {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  if (doc.querySelector("parsererror") || !doc.querySelector("FileZilla3")) return null;
+  const out = [];
+  // querySelectorAll("Server") flattens the folder tree — nested sites included.
+  for (const server of doc.querySelectorAll("Server")) {
+    const mapped = fileZillaServerToSite(server);
+    if (mapped) out.push({ site: mapped.site, password: mapped.password });
+  }
+  return out;
+}
+
+// Parse a Packetboat JSON export → [{ site, password, cloudSecrets }], or null.
+function parsePacketboatExport(text) {
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (_) {
+    return null;
+  }
+  const arr = Array.isArray(data) ? data : data && data.sites;
+  if (!Array.isArray(arr)) return null;
+  const out = [];
+  for (const raw of arr) {
+    if (!raw || !raw.protocol || !raw.host) continue;
+    const site = { ...raw };
+    delete site.password;
+    delete site.secrets;
+    site.id = newSiteId(); // exports omit ids; give each a fresh one
+    if (!site.name) site.name = site.host;
+    out.push({ site, password: raw.password || "", cloudSecrets: raw.secrets || {} });
+  }
+  return out;
+}
+
+// The site name in a FileZilla export is the trailing text node of <Server>
+// (some versions use a <Name> child instead — the caller tries that first).
+function fzServerName(server) {
+  let name = "";
+  for (const node of server.childNodes) {
+    if (node.nodeType === 3 /* text */) name += node.textContent;
+  }
+  return name.trim();
+}
+
+// ---- Site export ----
+
+// Export `list`: choose a format (Packetboat always; FileZilla only when every
+// site is FTP/SFTP), pick a path, and write the file.
+async function exportSites(list) {
+  if (!list || list.length === 0) return;
+  const allFileZillaCompatible = list.every((s) => !isCloud(s.protocol));
+  const choice = await promptExport(allFileZillaCompatible);
+  if (!choice) return; // cancelled
+  const { format, passphrase } = choice;
+  let contents;
+  let defaultName;
+  let ext;
+  let filterName;
+  if (format === "filezilla") {
+    contents = await buildFileZillaExport(list);
+    defaultName = "sites.xml";
+    ext = "xml";
+    filterName = "FileZilla site export";
+  } else {
+    contents = await buildPacketboatExport(list);
+    if (passphrase) {
+      contents = await encryptExport(contents, passphrase);
+      defaultName = "packetboat-sites-encrypted.json";
+    } else {
+      defaultName = "packetboat-sites.json";
+    }
+    ext = "json";
+    filterName = "Packetboat sites";
+  }
+  let path;
+  try {
+    path = await invoke("plugin:dialog|save", {
+      options: { title: "Export sites", defaultPath: defaultName, filters: [{ name: filterName, extensions: [ext] }] },
+    });
+  } catch (e) {
+    setSitesError(`Export failed: ${e}`);
+    return;
+  }
+  if (typeof path !== "string") return; // cancelled
+  try {
+    await invoke("write_text_file", { path, contents });
+    setStatus(`Exported ${list.length} site${list.length === 1 ? "" : "s"}.`);
+  } catch (e) {
+    setSitesError(`Export failed: ${e}`);
+  }
+}
+
+// Packetboat JSON export: each site object plus its keychain secrets, so the file
+// is a complete, re-importable backup. Secrets are in plaintext in the file (the
+// same tradeoff as FileZilla's base64) — it's the user's own backup.
+async function buildPacketboatExport(list) {
+  const out = [];
+  for (const s of list) {
+    const site = JSON.parse(JSON.stringify(s));
+    delete site.id; // regenerated on import
+    if (isCloud(s.protocol)) {
+      const secrets = {};
+      for (const key of cloudSecretKeys(s.protocol)) {
+        const v = await invoke("secret_get", { id: `${s.id}:${key}` }).catch(() => null);
+        if (v) secrets[key] = v;
+      }
+      if (Object.keys(secrets).length) site.secrets = secrets;
+    } else if (s.logon_type === "normal") {
+      const pw = await invoke("secret_get", { id: s.id }).catch(() => null);
+      if (pw) site.password = pw;
+    }
+    out.push(site);
+  }
+  return JSON.stringify({ format: "packetboat-sites", version: 1, sites: out }, null, 2);
+}
+
+// FileZilla XML export (FTP/SFTP only; cloud sites are skipped as unsupported).
+async function buildFileZillaExport(list) {
+  const esc = (v) => escapeHtml(String(v ?? ""));
+  let body = "";
+  for (const s of list) {
+    if (isCloud(s.protocol)) continue;
+    const port = s.port || defaultPort(s.protocol, s.encryption);
+    let passXml = "";
+    if (s.logon_type === "normal") {
+      const pw = await invoke("secret_get", { id: s.id }).catch(() => null);
+      if (pw) passXml = `\n      <Pass encoding="base64">${esc(encodeBase64(pw))}</Pass>`;
+    }
+    body +=
+      "    <Server>\n" +
+      `      <Host>${esc(s.host)}</Host>\n` +
+      `      <Port>${port}</Port>\n` +
+      `      <Protocol>${fzProtocolCode(s)}</Protocol>\n` +
+      "      <Type>0</Type>\n" +
+      `      <User>${esc(s.username)}</User>${passXml}\n` +
+      `      <Logontype>${fzLogontypeCode(s)}</Logontype>\n` +
+      `      <PasvMode>${s.passive === false ? "MODE_ACTIVE" : "MODE_DEFAULT"}</PasvMode>\n` +
+      `      <LocalDir>${esc(s.local_dir || "")}</LocalDir>\n` +
+      `      <RemoteDir>${esc(serializeFileZillaRemoteDir(s.remote_dir || ""))}</RemoteDir>\n` +
+      `      <SyncBrowsing>${s.sync_browsing ? 1 : 0}</SyncBrowsing>\n` +
+      `      ${esc(s.name || s.host)}\n` +
+      "    </Server>\n";
+  }
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<FileZilla3>\n  <Servers>\n${body}  </Servers>\n</FileZilla3>\n`;
+}
+
+// Packetboat protocol/encryption → FileZilla ServerProtocol (reverse of import).
+function fzProtocolCode(s) {
+  if (s.protocol === "sftp") return 1;
+  const enc = s.encryption || (s.protocol === "ftps" ? "explicit" : "explicit_optional");
+  return enc === "implicit" ? 3 : enc === "explicit" ? 4 : enc === "plain" ? 6 : 0;
+}
+function fzLogontypeCode(s) {
+  return s.logon_type === "anonymous" ? 0 : s.logon_type === "normal" ? 1 : 2; // 2 = Ask
+}
+// Serialize a "/a/b" path into FileZilla's "<type> <prefixLen> [<len> <seg>]…".
+function serializeFileZillaRemoteDir(remoteDir) {
+  const segs = String(remoteDir || "").split("/").filter(Boolean);
+  if (!segs.length) return "";
+  let out = "1 0"; // 1 = Unix server type, 0 = no server prefix
+  for (const seg of segs) out += ` ${seg.length} ${seg}`;
+  return out;
+}
+
+// Export prompt: choose the format (FileZilla offered only when every site is
+// FTP/SFTP) and an optional encryption passphrase for the Packetboat format.
+// Resolves to { format: "packetboat" | "filezilla", passphrase } or null.
+function promptExport(allFileZillaCompatible) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    const form = document.createElement("form");
+    form.className = "modal modal-sm modal-export";
+    const formatSection = allFileZillaCompatible
+      ? '<p class="dialog-body">Choose an export format.</p>' +
+        '<label class="radio"><input type="radio" name="fmt" value="packetboat" checked /> Packetboat (JSON) — full, re-importable backup</label>' +
+        '<label class="radio"><input type="radio" name="fmt" value="filezilla" /> FileZilla (XML) — to import into FileZilla</label>'
+      : '<p class="dialog-body">Exporting as <strong>Packetboat (JSON)</strong>.</p>';
+    form.innerHTML =
+      "<h2>Export sites</h2>" +
+      formatSection +
+      '<label class="field" id="export-encrypt-field"><span>Encrypt with a password (optional)</span>' +
+      '<input type="password" id="export-pass" autocomplete="new-password" /></label>' +
+      '<p class="hint" id="export-pass-hint">Leave blank to export unencrypted — the file will contain your saved passwords. With a password, it\'s encrypted (AES-256) and you\'ll need that password to import it.</p>' +
+      '<div class="modal-actions"><button type="button" class="btn" data-cancel>Cancel</button><button type="submit" class="btn btn-primary">Export…</button></div>';
+    backdrop.appendChild(form);
+    document.body.appendChild(backdrop);
+    const done = (r) => {
+      backdrop.remove();
+      resolve(r);
+    };
+    const chosenFormat = () => {
+      const r = form.querySelector('input[name="fmt"]:checked');
+      return r ? r.value : "packetboat";
+    };
+    // Encryption applies to the Packetboat format only; hide it for FileZilla.
+    const encField = form.querySelector("#export-encrypt-field");
+    const encHint = form.querySelector("#export-pass-hint");
+    const syncEnc = () => {
+      const pb = chosenFormat() === "packetboat";
+      encField.hidden = !pb;
+      encHint.hidden = !pb;
+    };
+    form.querySelectorAll('input[name="fmt"]').forEach((r) => r.addEventListener("change", syncEnc));
+    syncEnc();
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const format = chosenFormat();
+      done({ format, passphrase: format === "packetboat" ? form.querySelector("#export-pass").value : "" });
+    });
+    form.querySelector("[data-cancel]").addEventListener("click", () => done(null));
+    backdrop.addEventListener("mousedown", (e) => {
+      if (e.target === backdrop) done(null);
+    });
+  });
+}
+
+// ---- Export encryption (AES-256-GCM, PBKDF2-SHA256 key from a passphrase) ----
+// Web Crypto — no dependencies. Produces/consumes a self-describing JSON envelope.
+const EXPORT_KDF_ITERATIONS = 210000;
+
+function bufToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 1) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+async function deriveExportKey(passphrase, salt, iterations, usage) {
+  const material = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(passphrase),
+    "PBKDF2",
+    false,
+    ["deriveKey"],
+  );
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
+    material,
+    { name: "AES-GCM", length: 256 },
+    false,
+    [usage],
+  );
+}
+async function encryptExport(plaintext, passphrase) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveExportKey(passphrase, salt, EXPORT_KDF_ITERATIONS, "encrypt");
+  const ct = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    new TextEncoder().encode(plaintext),
+  );
+  return JSON.stringify(
+    {
+      format: "packetboat-sites-encrypted",
+      version: 1,
+      kdf: "PBKDF2-SHA256",
+      iterations: EXPORT_KDF_ITERATIONS,
+      salt: bufToBase64(salt),
+      iv: bufToBase64(iv),
+      ciphertext: bufToBase64(ct),
+    },
+    null,
+    2,
+  );
+}
+async function decryptExport(env, passphrase) {
+  const key = await deriveExportKey(
+    passphrase,
+    base64ToBytes(env.salt),
+    env.iterations || EXPORT_KDF_ITERATIONS,
+    "decrypt",
+  );
+  const pt = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: base64ToBytes(env.iv) },
+    key,
+    base64ToBytes(env.ciphertext),
+  );
+  return new TextDecoder().decode(pt);
 }
 
 // Per-duplicate prompt during import. Resolves to { action: "skip" | "overwrite"
@@ -1637,23 +2090,34 @@ async function saveSite() {
 }
 
 async function deleteSite() {
-  const idx = sites.findIndex((s) => s.id === selectedSiteId);
-  if (idx < 0) return;
-  const [removed] = sites.splice(idx, 1);
+  const toDelete = sites.filter((s) => selectedSiteIds.includes(s.id));
+  if (toDelete.length === 0) return;
+  const title =
+    toDelete.length === 1
+      ? `Delete "${toDelete[0].name || toDelete[0].host}"?`
+      : `Delete ${toDelete.length} sites?`;
+  if (!(await confirmDialog(title, "This can't be undone.", "Delete"))) return;
+  const ids = new Set(toDelete.map((s) => s.id));
+  sites = sites.filter((s) => !ids.has(s.id));
+  selectedSiteIds = [];
   selectedSiteId = null;
+  siteAnchorIndex = -1;
   try {
-    if (isCloud(removed.protocol)) {
-      for (const key of cloudSecretKeys(removed.protocol)) {
-        await invoke("secret_delete", { id: `${removed.id}:${key}` });
+    for (const removed of toDelete) {
+      if (isCloud(removed.protocol)) {
+        for (const key of cloudSecretKeys(removed.protocol)) {
+          await invoke("secret_delete", { id: `${removed.id}:${key}` }).catch(() => {});
+        }
+      } else {
+        await invoke("secret_delete", { id: removed.id }).catch(() => {});
       }
-    } else {
-      await invoke("secret_delete", { id: removed.id });
     }
     await invoke("sites_save", { sites });
   } catch (_) {
     /* ignore */
   }
-  fillSiteForm(null);
+  setSiteFormEnabled(false);
+  updateSiteButtons();
   renderSites();
 }
 
@@ -1885,10 +2349,16 @@ function setSitesError(msg) {
   }
 }
 
-function openSites() {
+async function openSites() {
   setSitesError(null);
+  selectedSiteIds = [];
+  selectedSiteId = null;
+  siteAnchorIndex = -1;
   el.sitesModal.hidden = false;
-  loadSites();
+  await loadSites();
+  // Nothing selected yet → blank, disabled form until the user picks or adds one.
+  setSiteFormEnabled(false);
+  updateSiteButtons();
 }
 
 function closeSites() {
@@ -2986,8 +3456,28 @@ function wireEvents() {
   document.getElementById("connect-btn-2").addEventListener("click", openSites);
   document.getElementById("sites-close").addEventListener("click", closeSites);
   document.getElementById("site-new").addEventListener("click", newSite);
+  document.getElementById("site-duplicate").addEventListener("click", duplicateSite);
   document.getElementById("site-delete").addEventListener("click", deleteSite);
-  document.getElementById("site-import").addEventListener("click", importFileZilla);
+  document.getElementById("site-import").addEventListener("click", importSites);
+  document.getElementById("site-export").addEventListener("click", () =>
+    exportSites(sites.filter((s) => selectedSiteIds.includes(s.id))),
+  );
+  // The caret opens a menu so it's explicit what gets exported: the current
+  // selection, or every saved site.
+  document.getElementById("site-export-all").addEventListener("click", (ev) => {
+    ev.stopPropagation(); // don't let the global click handler close the menu we open
+    const selected = sites.filter((s) => selectedSiteIds.includes(s.id));
+    const items = [];
+    if (selected.length) {
+      items.push({
+        label: `Export selected (${selected.length})`,
+        action: () => exportSites(selected),
+      });
+    }
+    items.push({ label: `Export all sites (${sites.length})`, action: () => exportSites([...sites]) });
+    const r = ev.currentTarget.getBoundingClientRect();
+    showMenu(r.left, r.bottom + 4, items);
+  });
   document.getElementById("site-save").addEventListener("click", saveSite);
   document.getElementById("site-connect").addEventListener("click", connectSite);
   el.siteLocalBrowse.addEventListener("click", browseLocalDir);

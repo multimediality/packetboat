@@ -1520,6 +1520,11 @@ input[type="number"]::-webkit-inner-spin-button {
   min-width: 450px;
 }
 
+/* The export-format prompt is a touch wider so the format labels fit on one line. */
+.modal-export {
+  width: 425px;
+}
+
 .dialog-body {
   margin: 0;
   color: var(--muted);
@@ -1704,12 +1709,33 @@ input[type="number"]::-webkit-inner-spin-button {
 
 .sites-list-actions {
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sites-actions-row {
+  display: flex;
   gap: 8px;
 }
 
 .sites-list-actions .btn {
   flex: 1;
   padding: 6px;
+}
+
+/* Export split button shares the row width; its caret stays compact. */
+.sites-actions-row > .sites-btn-group {
+  flex: 1;
+}
+
+.sites-actions-row .btn-caret {
+  flex: 0 0 auto;
+}
+
+/* When zero/multiple sites are selected the form is blanked + disabled; dim it
+   so it reads as inactive. */
+.sites-form.form-disabled {
+  opacity: 0.5;
 }
 
 /* 1Password reference field: Test sits inline to the right of the input (via
@@ -1877,7 +1903,7 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 
 .btn-caret {
-  padding: 0px 6px;
+  padding: 0px 6px !important;
   font-size: 18px;
 }
 

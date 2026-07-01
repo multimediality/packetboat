@@ -189,9 +189,18 @@
           <div class="sites-list-col">
             <div class="sites-list" id="sites-list"></div>
             <div class="sites-list-actions">
-              <button type="button" class="btn" id="site-new">New site</button>
-              <button type="button" class="btn" id="site-delete">Delete</button>
-              <button type="button" class="btn" id="site-import" title="Import sites from a FileZilla XML export">Import…</button>
+              <div class="sites-actions-row">
+                <button type="button" class="btn" id="site-new">New site</button>
+                <button type="button" class="btn" id="site-duplicate" disabled>Duplicate</button>
+                <button type="button" class="btn" id="site-delete" disabled>Delete</button>
+              </div>
+              <div class="sites-actions-row">
+                <button type="button" class="btn" id="site-import" title="Import sites from a FileZilla or Packetboat export">Import…</button>
+                <div class="sites-btn-group">
+                  <button type="button" class="btn" id="site-export" disabled title="Export the selected site(s)">Export…</button>
+                  <button type="button" class="btn btn-caret" id="site-export-all" title="Export all sites">▾</button>
+                </div>
+              </div>
             </div>
           </div>
           <div class="sites-form">

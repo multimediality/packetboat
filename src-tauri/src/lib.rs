@@ -544,6 +544,12 @@ fn read_text_file(path: String) -> BackendResult<String> {
     std::fs::read_to_string(&path).map_err(|e| BackendError::Other(e.to_string()))
 }
 
+/// Write a UTF-8 text file (used to export sites to a user-chosen path).
+#[tauri::command]
+fn write_text_file(path: String, contents: String) -> BackendResult<()> {
+    std::fs::write(&path, contents).map_err(|e| BackendError::Other(e.to_string()))
+}
+
 /// Build an `op` (1Password CLI) command, suppressing the console window that
 /// would otherwise flash on Windows when a GUI app spawns a console process.
 fn op_command() -> std::process::Command {
@@ -849,6 +855,7 @@ pub fn run() {
             is_dev,
             notify,
             read_text_file,
+            write_text_file,
             op_available,
             resolve_op_reference,
             check_update,
