@@ -3319,7 +3319,7 @@ function renderUpdateStatus(s) {
     ) {
       // The endpoint 404s until a signed release with latest.json is published.
       box.textContent =
-        "No published release found yet — the updater starts working once your first signed GitHub release is published (and not left as a draft).";
+        "No published release found yet — the updater starts working once your first signed GitHub release is published.";
     } else if (detail) {
       box.textContent = `Couldn't check for updates: ${detail}`;
     } else {

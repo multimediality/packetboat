@@ -1,6 +1,6 @@
 [package]
 name = "packetboat"
-version = "0.5.0"
+version = "0.9.0"
 description = "A modern, cross-platform file transfer client (FTP-first, cloud-capable)."
 authors = ["Packetboat contributors"]
 license = "GPL-3.0-or-later"
@@ -49,13 +49,15 @@ russh-sftp = "2"
 # the prebuilt-NASM config); suppaftp's native-tls module uses Unix-only
 # std::os::fd and doesn't build on Windows.
 # "deprecated" enables connect_secure_implicit (implicit FTPS).
-suppaftp = { version = "9", features = ["tokio", "tokio-rustls-aws-lc-rs", "deprecated"] }
+suppaftp = { version = "10", features = ["tokio", "tokio-rustls-aws-lc-rs", "deprecated"] }
 # Mozilla root certificates for FTPS server verification.
-webpki-roots = "0.26"
+webpki-roots = "1"
 # FTPS certificate trust-on-first-use: SHA-256 fingerprinting + parsing the
 # server cert (subject/issuer/SANs/validity) for the trust prompt.
+# Kept at 0.10 (not 0.11): the tree already pulls sha2 0.10 transitively (rsa /
+# pkcs5 via OpenDAL), so 0.11 would just add a duplicate for the same SHA-256.
 sha2 = "0.10"
-x509-parser = "0.16"
+x509-parser = "0.18"
 
 # OpenDAL — multi-backend layer for cloud storage (S3, B2, WebDAV, …), exposed
 # behind the same StorageBackend trait. Services are reached generically via
@@ -72,5 +74,5 @@ keyring = "4"
 # icon) and send toasts under it so they attribute to Packetboat everywhere.
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.7"
-winreg = "0.55"
-windows-sys = { version = "0.59", features = ["Win32_UI_Shell"] }
+winreg = "0.56"
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell"] }

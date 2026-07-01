@@ -127,9 +127,11 @@ error/reference parsing.
 ## Releases
 
 Pushing a version tag (e.g. `v0.1.0`) triggers the
-[release workflow](.github/workflows/release.yml), which builds and uploads
-installers for Windows, macOS (Intel + Apple Silicon), and Linux to a draft
-GitHub release.
+[release workflow](.github/workflows/release.yml), which builds and **publishes**
+a GitHub release with installers for Windows, macOS (Intel + Apple Silicon), and
+Linux. Releases are published as normal (non-pre-release) releases on purpose:
+GitHub's `releases/latest` — the in-app updater endpoint — skips pre-releases, so
+marking them pre-release would hide every build from the updater.
 
 Bump the version with the sync script ([scripts/version.mjs](scripts/version.mjs))
 so `package.json`, `tauri.conf.json`, `Cargo.toml`, and `Cargo.lock` never drift:
