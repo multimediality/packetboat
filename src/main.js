@@ -99,6 +99,10 @@ function cacheEls() {
   el.siteOpReference = document.getElementById("site-op-reference");
   el.siteOpTest = document.getElementById("site-op-test");
   el.siteOpResult = document.getElementById("site-op-result");
+  el.siteKeyField = document.getElementById("site-key-field");
+  el.siteKeyPath = document.getElementById("site-key-path");
+  el.siteKeyBrowse = document.getElementById("site-key-browse");
+  el.siteKeyPass = document.getElementById("site-key-pass");
   el.siteEncryption = document.getElementById("site-encryption");
   el.siteEncryptionField = document.getElementById("site-encryption-field");
   el.sitePassive = document.getElementById("site-passive");
@@ -626,6 +630,49 @@ function promptCertTrust(cert) {
   });
 }
 
+// "Host key changed" re-trust prompt for SFTP — mirrors the FTPS cert prompt.
+// Shows the previously-trusted vs. offered fingerprints and resolves true if the
+// user chooses to trust the new key. Values are set via textContent (server data).
+function promptHostKeyChanged(info) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    const form = document.createElement("form");
+    form.className = "modal";
+    form.innerHTML =
+      "<h2>Host key changed</h2>" +
+      '<p class="dialog-warn">⚠ This server’s SSH host key has changed since you last trusted it. If you did not expect this, it could indicate a man-in-the-middle attack — do not continue unless you know why it changed.</p>' +
+      '<dl class="cert-details">' +
+      '<dt>Host</dt><dd data-f="hostport"></dd>' +
+      '<dt>Key type</dt><dd data-f="keytype"></dd>' +
+      '<dt>New fingerprint</dt><dd class="cert-fp" data-f="fp"></dd>' +
+      '<dt>Previously trusted</dt><dd class="cert-fp" data-f="known"></dd>' +
+      "</dl>" +
+      '<div class="modal-actions"><button type="button" class="btn" data-cancel>Cancel</button><button type="submit" class="btn btn-primary">Trust new key and connect</button></div>';
+    const set = (f, v) => {
+      form.querySelector(`[data-f="${f}"]`).textContent = v && String(v).trim() ? v : "—";
+    };
+    set("hostport", `${info.host}:${info.port}`);
+    set("keytype", info.keyType);
+    set("fp", info.fingerprint);
+    set("known", info.known);
+    backdrop.appendChild(form);
+    document.body.appendChild(backdrop);
+    const done = (r) => {
+      backdrop.remove();
+      resolve(r);
+    };
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      done(true);
+    });
+    form.querySelector("[data-cancel]").addEventListener("click", () => done(false));
+    backdrop.addEventListener("click", (e) => {
+      if (e.target === backdrop) done(false);
+    });
+  });
+}
+
 async function goUp(side) {
   if (side === "local") {
     if (!state.local.path) return;
@@ -951,12 +998,42 @@ function renderTabs() {
 }
 
 // Shared connect path used by both quick connect and the site manager.
+// Resolve a site's saved "default remote directory" against the live server.
+// An absolute path that doesn't exist as-is is retried relative to the login
+// home, so a familiar "/public_html" works on servers (e.g. cPanel over SFTP)
+// where it actually lives under the home rather than at the filesystem root —
+// while a genuinely absolute path like "/var/www/html" is still used verbatim.
+async function resolveStartDir(id, remoteDir, home) {
+  const want = (remoteDir || "").trim();
+  if (!want) return home;
+  const opens = async (p) => {
+    try {
+      await invoke("list_remote", { id, path: p });
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+  if (await opens(want)) return want;
+  // Retry "/public_html" as "<home>/public_html" (leading slash relative to home).
+  if (want.startsWith("/") && home && home !== "/") {
+    const underHome = joinPath(home, want.replace(/^\/+/, ""));
+    if (await opens(underHome)) return underHome;
+  }
+  // Configured dir can't be opened: land on home so the pane isn't stuck on an
+  // error, and say why.
+  log(`Couldn't open the site's remote directory “${want}”; opened ${home} instead.`, "error");
+  return home;
+}
+
 async function doConnectWith({
   protocol,
   host,
   port,
   username,
   password,
+  keyPath,
+  passphrase,
   encryption,
   passive,
   label,
@@ -1001,7 +1078,31 @@ async function doConnectWith({
     if (cloud) {
       result = await invoke("connect_opendal", { service, config });
     } else if (protocol === "sftp") {
-      result = await invoke("connect_sftp", { config: { host, port, username, password } });
+      const cfg = {
+        host,
+        port,
+        username,
+        password,
+        key_path: keyPath || "",
+        passphrase: passphrase || "",
+      };
+      result = await invoke("connect_sftp", { config: cfg });
+      // Changed host key (possible MITM): prompt to re-trust it, then retry.
+      if (result.hostKeyPrompt) {
+        const trusted = await promptHostKeyChanged(result.hostKeyPrompt);
+        if (!trusted) {
+          log("Connection cancelled — host key not trusted.", "error");
+          syncRemoteUI();
+          return false;
+        }
+        await invoke("trust_host_key", {
+          host: cfg.host,
+          port: cfg.port,
+          fingerprint: result.hostKeyPrompt.fingerprint,
+        });
+        result = await invoke("connect_sftp", { config: cfg });
+        if (result.hostKeyPrompt) throw new Error("host key still not trusted");
+      }
     } else {
       const cfg = {
         host,
@@ -1032,7 +1133,7 @@ async function doConnectWith({
     addTab(result.id, label || (cloud ? target : `${username || "anonymous"}@${host}`), cloud);
     log(`Connected to ${target}`, "success");
     await loadTreeRoots("remote");
-    await navigateRemote(remoteDir || result.home);
+    await navigateRemote(await resolveStartDir(result.id, remoteDir, result.home));
     if (localDir) await navigateLocal(localDir);
     // Synchronized browsing: anchor the mirror at the two directories the panes
     // just landed on.
@@ -1191,6 +1292,11 @@ function updateProtocolFields(values) {
   // Encryption + transfer mode only apply to FTP (not SFTP).
   el.siteEncryptionField.hidden = proto !== "ftp";
   el.siteTransferModeField.hidden = proto !== "ftp";
+  // Key-file auth is SFTP-only; disable the option (and revert a stale choice)
+  // for other protocols.
+  const keyOpt = el.siteLogon.querySelector('option[value="key"]');
+  if (keyOpt) keyOpt.disabled = proto !== "sftp";
+  if (proto !== "sftp" && el.siteLogon.value === "key") el.siteLogon.value = "normal";
   if (cloud) {
     const def = CLOUD_SERVICES[proto];
     const base =
@@ -1340,6 +1446,8 @@ function fillSiteForm(site) {
   el.sitePass.value = "";
   el.siteLogon.value = site ? site.logon_type || "ask" : "normal";
   el.siteOpReference.value = site ? site.op_reference || "" : "";
+  el.siteKeyPath.value = site ? site.key_path || "" : "";
+  el.siteKeyPass.value = ""; // passphrase is loaded from the keychain in selectSite()
   setOpResult("", "");
   // Cloud sites pre-fill the per-service inputs from saved config; secret keys
   // are loaded from the keychain in selectSite().
@@ -1378,6 +1486,14 @@ async function selectSite(id) {
     try {
       const pw = await invoke("secret_get", { id });
       if (pw) el.sitePass.value = pw;
+    } catch (_) {
+      /* ignore */
+    }
+  } else if (site.logon_type === "key") {
+    // Pre-fill the saved key passphrase from the keychain.
+    try {
+      const pp = await invoke("secret_get", { id: `${id}:keypass` });
+      if (pp) el.siteKeyPass.value = pp;
     } catch (_) {
       /* ignore */
     }
@@ -1428,6 +1544,9 @@ async function duplicateSite() {
     } else {
       const pw = await invoke("secret_get", { id: src.id }).catch(() => null);
       if (pw) await invoke("secret_set", { id: copy.id, password: pw });
+      // Key sites keep their passphrase under a ":keypass" composite key.
+      const pp = await invoke("secret_get", { id: `${src.id}:keypass` }).catch(() => null);
+      if (pp) await invoke("secret_set", { id: `${copy.id}:keypass`, password: pp });
     }
   } catch (e) {
     setSitesError(String(e));
@@ -2023,6 +2142,23 @@ async function browseLocalDir() {
   }
 }
 
+// Native file picker for the SFTP "Private key file" field.
+async function browseKeyFile() {
+  try {
+    const path = await invoke("plugin:dialog|open", {
+      options: {
+        directory: false,
+        multiple: false,
+        title: "Choose a private key file",
+        defaultPath: el.siteKeyPath.value || undefined,
+      },
+    });
+    if (typeof path === "string") el.siteKeyPath.value = path;
+  } catch (e) {
+    log(`File picker failed: ${e}`, "error");
+  }
+}
+
 function readSiteForm() {
   const protocol = el.siteProtocol.value;
   // Default directories apply to every protocol (where to start each pane).
@@ -2052,6 +2188,7 @@ function readSiteForm() {
     username: el.siteUser.value.trim(),
     logon_type: el.siteLogon.value,
     op_reference: normalizeOpRef(el.siteOpReference.value),
+    key_path: el.siteLogon.value === "key" ? el.siteKeyPath.value.trim() : "",
     encryption: protocol === "ftp" ? el.siteEncryption.value : "",
     passive: protocol === "ftp" ? el.sitePassive.checked : true,
     config: {},
@@ -2081,8 +2218,18 @@ async function saveSite() {
       }
     } else if (site.logon_type === "normal" && el.sitePass.value) {
       await invoke("secret_set", { id: site.id, password: el.sitePass.value });
+      await invoke("secret_delete", { id: `${site.id}:keypass` });
+    } else if (site.logon_type === "key") {
+      // Key auth has no password; the optional passphrase lives in the keychain.
+      await invoke("secret_delete", { id: site.id });
+      if (el.siteKeyPass.value) {
+        await invoke("secret_set", { id: `${site.id}:keypass`, password: el.siteKeyPass.value });
+      } else {
+        await invoke("secret_delete", { id: `${site.id}:keypass` });
+      }
     } else {
       await invoke("secret_delete", { id: site.id });
+      await invoke("secret_delete", { id: `${site.id}:keypass` });
     }
     setSitesError(null);
     renderSites();
@@ -2113,6 +2260,8 @@ async function deleteSite() {
         }
       } else {
         await invoke("secret_delete", { id: removed.id }).catch(() => {});
+        // Also clear a key site's passphrase (stored under a ":keypass" key).
+        await invoke("secret_delete", { id: `${removed.id}:keypass` }).catch(() => {});
       }
     }
     await invoke("sites_save", { sites });
@@ -2135,6 +2284,8 @@ async function connectUsing({
   logonType,
   password,
   opReference,
+  keyPath,
+  keyPassphrase,
   encryption,
   passive,
   siteId,
@@ -2144,6 +2295,8 @@ async function connectUsing({
 }) {
   let user = username;
   let pw = password || "";
+  let keyFile = keyPath || "";
+  let passphrase = keyPassphrase || "";
 
   if (logonType === "anonymous") {
     user = "anonymous";
@@ -2159,6 +2312,20 @@ async function connectUsing({
     } catch (e) {
       setStatus(String(e), true);
       return;
+    }
+  } else if (logonType === "key") {
+    if (!keyFile) {
+      setStatus("Choose a private key file for this site first.", true);
+      return;
+    }
+    // Key auth uses no password; pull the saved passphrase if we don't have one.
+    pw = "";
+    if (!passphrase && siteId) {
+      try {
+        passphrase = (await invoke("secret_get", { id: `${siteId}:keypass` })) || "";
+      } catch (_) {
+        /* ignore */
+      }
     }
   } else {
     // "Normal" sites keep the password in the keychain; pull it if we don't
@@ -2183,6 +2350,8 @@ async function connectUsing({
     port: port || defaultPort(protocol, encryption),
     username: user,
     password: pw,
+    keyPath: keyFile,
+    passphrase,
     encryption,
     passive,
     label: name && name !== host ? `${name} — ${who}` : who,
@@ -2199,9 +2368,11 @@ function updateLogonFields() {
   const showUser = t !== "anonymous";
   const showPass = t === "normal";
   const showOp = t === "1password";
+  const showKey = t === "key";
   el.siteUser.closest(".field").hidden = !showUser;
   el.sitePass.closest(".field").hidden = !showPass;
   el.siteOpField.hidden = !showOp;
+  el.siteKeyField.hidden = !showKey;
   if (!showUser) el.siteUser.value = "";
   if (!showPass) el.sitePass.value = "";
   el.siteLogonHint.textContent =
@@ -2209,6 +2380,7 @@ function updateLogonFields() {
       normal:
         "Username and password are saved — the password goes in your OS keychain (Windows Credential Manager), never the site file.",
       ask: "Only the username is saved. You'll be asked for the password each time you connect.",
+      key: "SFTP only. The username and key file path are saved; an optional passphrase goes in your OS keychain, never the site file.",
       anonymous: "Connects as “anonymous” — no username or password needed (FTP).",
       "1password":
         "The username is saved. At connect time Packetboat resolves the reference with the 1Password CLI (op) — only the pointer is stored, never the password.",
@@ -2289,6 +2461,8 @@ async function connectSite() {
     logonType: form.logon_type,
     password: typed,
     opReference: form.op_reference,
+    keyPath: form.key_path,
+    keyPassphrase: el.siteKeyPass.value,
     encryption: form.encryption,
     passive: form.passive,
     siteId: site.id,
@@ -2318,6 +2492,8 @@ async function connectFromMenu(site) {
     logonType: site.logon_type,
     password: "",
     opReference: site.op_reference,
+    keyPath: site.key_path || "",
+    keyPassphrase: "",
     encryption: site.encryption,
     passive: site.passive,
     siteId: site.id,
@@ -3516,6 +3692,7 @@ function wireEvents() {
   // Implicit FTPS conventionally uses port 990; reflect that as the default.
   el.siteEncryption.addEventListener("change", reDefaultSitePort);
   el.siteLogon.addEventListener("change", updateLogonFields);
+  el.siteKeyBrowse.addEventListener("click", browseKeyFile);
   el.siteOpTest.addEventListener("click", testOpReference);
   // Clean pasted references (1Password copies them wrapped in quotes) as you go.
   el.siteOpReference.addEventListener("input", () => {

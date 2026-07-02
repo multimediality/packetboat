@@ -13,7 +13,7 @@ use std::sync::Arc;
 use backend::cloud::OpendalBackend;
 use backend::ftp::{CertCapture, CertInfo, FtpBackend, FtpConfig};
 use backend::local::LocalBackend;
-use backend::sftp::{SftpBackend, SftpConfig};
+use backend::sftp::{HostKeyCapture, HostKeyInfo, SftpBackend, SftpConfig};
 use backend::{safe_component, BackendError, BackendResult, Entry, EntryKind, StorageBackend};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -43,6 +43,10 @@ struct Site {
     /// store in the site file.
     #[serde(default)]
     op_reference: String,
+    /// Path to a private key file, used when `logon_type` is "key" (SFTP). A
+    /// pointer, not a secret — the optional passphrase lives in the keychain.
+    #[serde(default)]
+    key_path: String,
     /// FTP TLS mode (plain | explicit_optional | explicit | implicit). Empty for
     /// non-FTP protocols.
     #[serde(default)]
@@ -121,19 +125,64 @@ fn posix_with_name(path: &str, name: &str) -> String {
     }
 }
 
-/// Open an SFTP connection as a new remote. Returns its id (the tab handle) and
-/// the resolved login directory.
+/// Outcome of an SFTP connect: either a live connection (`id`/`home`) or, when
+/// the server's host key has *changed* since it was first trusted, a
+/// `hostKeyPrompt` for the frontend to confirm before retrying (mirrors the FTPS
+/// `certPrompt` flow).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SftpConnectOutcome {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_key_prompt: Option<HostKeyInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    home: Option<String>,
+}
+
+/// Open an SFTP connection as a new remote. On a changed host key, returns
+/// `{ hostKeyPrompt }` instead of connecting, so the UI can ask the user to
+/// re-trust it (via `trust_host_key`) and retry.
 #[tauri::command]
 async fn connect_sftp(
     state: State<'_, AppState>,
     config: SftpConfig,
-) -> BackendResult<ConnectResult> {
-    let backend = SftpBackend::connect(&config).await?;
-    let home = backend
-        .canonicalize(".")
-        .await
-        .unwrap_or_else(|_| "/".to_string());
-    Ok(add_connection(&state, Arc::new(backend), home).await)
+) -> BackendResult<SftpConnectOutcome> {
+    let capture: HostKeyCapture = Arc::new(std::sync::Mutex::new(None));
+    match SftpBackend::connect(&config, capture.clone()).await {
+        Ok(backend) => {
+            let home = backend
+                .canonicalize(".")
+                .await
+                .unwrap_or_else(|_| "/".to_string());
+            let result = add_connection(&state, Arc::new(backend), home).await;
+            Ok(SftpConnectOutcome {
+                host_key_prompt: None,
+                id: Some(result.id),
+                home: Some(result.home),
+            })
+        }
+        Err(e) => {
+            // A changed host key was captured during the handshake → prompt
+            // instead of surfacing a raw rejection error.
+            let captured = capture.lock().ok().and_then(|mut s| s.take());
+            match captured {
+                Some(info) => Ok(SftpConnectOutcome {
+                    host_key_prompt: Some(info),
+                    id: None,
+                    home: None,
+                }),
+                None => Err(e),
+            }
+        }
+    }
+}
+
+/// Trust a (new/changed) SSH host key by fingerprint, after the user accepts the
+/// prompt. The next connect to `host:port` accepts this key.
+#[tauri::command]
+fn trust_host_key(host: String, port: u16, fingerprint: String) {
+    backend::sftp::trust_host_key(&host, port, &fingerprint);
 }
 
 /// Outcome of an FTP connect: either a live connection (`id`/`home`) or, when
@@ -914,6 +963,7 @@ pub fn run() {
             connect_sftp,
             connect_ftp,
             trust_cert,
+            trust_host_key,
             connect_opendal,
             list_tree,
             disconnect,

@@ -2,21 +2,22 @@
 //! `ssh` binary or libssh2 needed, which is what makes it work cleanly on
 //! Windows) plus russh-sftp for the SFTP subsystem itself.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use russh::client::{self, AuthResult, Handle, KeyboardInteractiveAuthResponse};
+use russh::keys::{HashAlg, PrivateKeyWithHashAlg};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncSeekExt, AsyncWrite};
 use tokio::sync::Mutex;
 
 use super::{BackendError, BackendKind, BackendResult, Entry, EntryKind, StorageBackend};
 
 /// Connection parameters for an SFTP site. Mirrors the frontend connect form.
-/// Passwords live only in memory for now — OS keychain integration is the next
-/// step before this is fit for daily use.
+/// Secrets (password / key passphrase) are supplied per-connect and held only in
+/// memory; the Site Manager persists saved passwords in the OS keychain.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SftpConfig {
     pub host: String,
@@ -25,6 +26,13 @@ pub struct SftpConfig {
     pub username: String,
     #[serde(default)]
     pub password: String,
+    /// Path to a private key file. When set, authentication uses public-key
+    /// auth (with `passphrase` if the key is encrypted) instead of the password.
+    #[serde(default)]
+    pub key_path: String,
+    /// Passphrase for an encrypted private key. Empty for unencrypted keys.
+    #[serde(default)]
+    pub passphrase: String,
 }
 
 fn default_port() -> u16 {
@@ -40,13 +48,19 @@ pub struct SftpBackend {
 }
 
 impl SftpBackend {
-    pub async fn connect(config: &SftpConfig) -> BackendResult<Self> {
+    /// Connect and authenticate. A *changed* host key (possible MITM) is recorded
+    /// in `host_key_capture` and the handshake rejected, so the caller can prompt
+    /// the user to re-trust it (mirrors the FTPS cert flow).
+    pub async fn connect(config: &SftpConfig, host_key_capture: HostKeyCapture) -> BackendResult<Self> {
         let ssh_config = Arc::new(client::Config::default());
-        let rejected = Arc::new(std::sync::Mutex::new(None));
+        let rejected = Arc::new(StdMutex::new(None));
         let handler = ClientHandler {
+            host: config.host.clone(),
+            port: config.port,
             host_key: format!("{}:{}", config.host, config.port),
             known_hosts: known_hosts_path(),
             rejected: rejected.clone(),
+            capture: host_key_capture,
         };
         let mut handle =
             match client::connect(ssh_config, (config.host.as_str(), config.port), handler).await {
@@ -61,7 +75,7 @@ impl SftpBackend {
                 }
             };
 
-        authenticate(&mut handle, &config.username, &config.password).await?;
+        authenticate(&mut handle, config).await?;
 
         let channel = handle.channel_open_session().await?;
         channel.request_subsystem(true, "sftp").await?;
@@ -188,15 +202,18 @@ fn join_path(base: &str, name: &str) -> String {
     }
 }
 
-/// Authenticates `handle`, trying the SSH `password` method first and then
-/// keyboard-interactive. Most OpenSSH servers present interactive password
-/// logins via keyboard-interactive, so the plain password method alone often
-/// fails even with correct credentials — hence the fallback.
-async fn authenticate(
-    handle: &mut Handle<ClientHandler>,
-    username: &str,
-    password: &str,
-) -> BackendResult<()> {
+/// Authenticates `handle` for `config`. With a `key_path`, uses public-key auth;
+/// otherwise tries the SSH `password` method first and then keyboard-interactive.
+/// Most OpenSSH servers present interactive password logins via
+/// keyboard-interactive, so the plain password method alone often fails even with
+/// correct credentials — hence the fallback.
+async fn authenticate(handle: &mut Handle<ClientHandler>, config: &SftpConfig) -> BackendResult<()> {
+    if !config.key_path.is_empty() {
+        return authenticate_key(handle, &config.username, &config.key_path, &config.passphrase)
+            .await;
+    }
+
+    let (username, password) = (&config.username, &config.password);
     if let AuthResult::Success = handle.authenticate_password(username, password).await? {
         return Ok(());
     }
@@ -221,16 +238,89 @@ async fn authenticate(
     }
 }
 
+/// Public-key authentication from a private key file. Reads and decrypts the key
+/// (with `passphrase` if it's encrypted), then offers it to the server. For RSA
+/// keys, tries the modern rsa-sha2-512/256 signatures before the legacy SHA-1 one
+/// (many servers reject SHA-1), so a valid RSA key isn't spuriously refused.
+async fn authenticate_key(
+    handle: &mut Handle<ClientHandler>,
+    username: &str,
+    key_path: &str,
+    passphrase: &str,
+) -> BackendResult<()> {
+    let pass = (!passphrase.is_empty()).then_some(passphrase);
+    let key = russh::keys::load_secret_key(key_path, pass).map_err(|e| match e {
+        russh::keys::Error::KeyIsEncrypted => BackendError::Ssh(
+            "This private key is protected by a passphrase — enter it and try again.".into(),
+        ),
+        other => BackendError::Ssh(format!(
+            "Couldn't load the private key at {key_path}: {other}"
+        )),
+    })?;
+
+    let key = Arc::new(key);
+    // Non-RSA keys ignore the hash alg; for RSA, prefer SHA-2 over legacy SHA-1.
+    let hash_algs: &[Option<HashAlg>] = if key.algorithm().is_rsa() {
+        &[Some(HashAlg::Sha512), Some(HashAlg::Sha256), None]
+    } else {
+        &[None]
+    };
+    for &alg in hash_algs {
+        let with_alg = PrivateKeyWithHashAlg::new(key.clone(), alg);
+        if let AuthResult::Success = handle.authenticate_publickey(username, with_alg).await? {
+            return Ok(());
+        }
+    }
+    Err(BackendError::Ssh(
+        "The server rejected this key. Check that it's authorized for this user.".into(),
+    ))
+}
+
+/// Trust a (new/changed) SSH host key by recording its fingerprint for
+/// `host:port`, so the next connect accepts it. Called after the user confirms
+/// the "host key changed" prompt.
+pub fn trust_host_key(host: &str, port: u16, fingerprint: &str) {
+    let path = known_hosts_path();
+    let mut hosts = load_known_hosts(&path);
+    hosts.insert(format!("{host}:{port}"), fingerprint.to_string());
+    save_known_hosts(&path, &hosts);
+}
+
+/// Details of an unexpected (changed) SSH host key, surfaced to the re-trust
+/// prompt. `known` is the previously-trusted fingerprint (the whole point of the
+/// warning); `fingerprint` is what the server offered now.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostKeyInfo {
+    pub host: String,
+    pub port: u16,
+    /// Key algorithm, e.g. "ssh-ed25519".
+    pub key_type: String,
+    /// SHA-256 fingerprint the server offered now.
+    pub fingerprint: String,
+    /// The fingerprint previously trusted for this host.
+    pub known: String,
+}
+
+/// Shared slot the host-key check writes a changed-key record into, for the
+/// connect command to read after the rejected handshake (mirrors FTPS
+/// `CertCapture`).
+pub type HostKeyCapture = Arc<StdMutex<Option<HostKeyInfo>>>;
+
 /// SSH session callbacks. Verifies the server's host key against a known_hosts
 /// file with "accept-new" semantics: an unknown host is trusted on first use
 /// and recorded; a host whose key has *changed* is rejected (possible MITM).
 struct ClientHandler {
+    host: String,
+    port: u16,
     /// "host:port", the key into the known_hosts map.
     host_key: String,
     known_hosts: std::path::PathBuf,
     /// Set with an explanation when a changed key is rejected, so `connect` can
     /// surface a clear error instead of a generic handshake failure.
-    rejected: Arc<std::sync::Mutex<Option<String>>>,
+    rejected: Arc<StdMutex<Option<String>>>,
+    /// Changed-key details for the re-trust prompt (see [`HostKeyInfo`]).
+    capture: HostKeyCapture,
 }
 
 impl client::Handler for ClientHandler {
@@ -247,14 +337,22 @@ impl client::Handler for ClientHandler {
         match hosts.get(&self.host_key) {
             Some(stored) if *stored == fingerprint => Ok(true),
             Some(stored) => {
+                // Record the change so the connect command can offer a re-trust
+                // prompt (instead of a dead-end error the user can only fix by
+                // hand-editing known_hosts.json).
+                if let Ok(mut slot) = self.capture.lock() {
+                    *slot = Some(HostKeyInfo {
+                        host: self.host.clone(),
+                        port: self.port,
+                        key_type: server_public_key.algorithm().to_string(),
+                        fingerprint: fingerprint.clone(),
+                        known: stored.clone(),
+                    });
+                }
                 *self.rejected.lock().unwrap() = Some(format!(
                     "host key for {} has CHANGED — possible man-in-the-middle. \
-                     Known {}, server offered {}. If you trust the change, remove the \
-                     entry from {}.",
-                    self.host_key,
-                    stored,
-                    fingerprint,
-                    self.known_hosts.display()
+                     Known {}, server offered {}.",
+                    self.host_key, stored, fingerprint
                 ));
                 Ok(false)
             }

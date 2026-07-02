@@ -248,6 +248,7 @@
                 <select id="site-logon">
                   <option value="normal">Normal — save username and password</option>
                   <option value="ask">Ask for password — save username only</option>
+                  <option value="key">Key file — authenticate with a private key</option>
                   <option value="anonymous">Anonymous</option>
                   <option value="1password">1Password — resolve a secret reference</option>
                 </select>
@@ -260,6 +261,24 @@
                 <span>Password</span>
                 <input id="site-pass" type="password" autocomplete="off" />
               </label>
+              <div class="field" id="site-key-field" hidden>
+                <span>Private key file</span>
+                <div class="dir-input">
+                  <input
+                    id="site-key-path"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="e.g. C:\Users\you\.ssh\id_ed25519"
+                  />
+                  <button type="button" class="btn" id="site-key-browse">Browse…</button>
+                </div>
+                <label class="field">
+                  <span>Passphrase (optional)</span>
+                  <input id="site-key-pass" type="password" autocomplete="off"
+                    placeholder="leave blank if the key isn't encrypted" />
+                </label>
+              </div>
               <label class="field" id="site-op-field" hidden>
                 <span>1Password secret reference</span>
                 <div class="dir-input">
