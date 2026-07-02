@@ -363,6 +363,11 @@ async fn run(
         Direction::Upload => (local, remote_be),
     };
 
+    // The destination file name must be a single, safe component. On download
+    // it comes from the remote server's listing; a name with separators or ".."
+    // could otherwise escape the chosen directory (path traversal).
+    crate::backend::safe_component(&req.name)?;
+
     // Join the destination directory and file name using the destination's
     // path convention (OS-native locally, POSIX remotely).
     let dst = match req.direction {

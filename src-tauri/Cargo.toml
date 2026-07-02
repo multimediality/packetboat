@@ -1,6 +1,6 @@
 [package]
 name = "packetboat"
-version = "1.0.0"
+version = "1.0.1"
 description = "A modern, cross-platform file transfer client (FTP-first, cloud-capable)."
 authors = ["Packetboat contributors"]
 license = "GPL-3.0-or-later"
@@ -31,6 +31,9 @@ tauri-plugin-updater = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Decodes the base64 metadata header for external drag-drop uploads (the file
+# bytes ride in the raw IPC body; small metadata rides in a header).
+base64 = "0.22"
 
 # Async runtime. Tauri already pulls tokio; we use it directly for fs + net.
 tokio = { version = "1", features = ["full"] }

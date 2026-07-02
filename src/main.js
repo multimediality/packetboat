@@ -1238,8 +1238,11 @@ async function connectCloud(service, config, label, siteId, dirs = {}) {
 async function loadSites() {
   try {
     sites = await invoke("sites_load");
-  } catch (_) {
+  } catch (e) {
+    // The saved sites file was corrupt; the backend backed it up. Surface it
+    // rather than showing an unexplained empty list.
     sites = [];
+    log(`${e}`, "error");
   }
   renderSites();
 }
@@ -2661,6 +2664,19 @@ async function safeMkdir(cmd, parent, name) {
   }
 }
 
+// Cap on drag-imported file size. The bytes travel in one raw IPC body and are
+// buffered once in memory, so a bound is kept (unbounded streaming of OS drops
+// would require Tauri's native drag-drop to expose the real file path).
+const MAX_DRAG_IMPORT_BYTES = 250 * 1024 * 1024;
+
+// Base64-encode a small object as UTF-8 JSON, for the x-pb-meta upload header.
+function encodeMeta(obj) {
+  const bytes = new TextEncoder().encode(JSON.stringify(obj));
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
 // Path helpers for building destination paths. Joining with "/" is fine for
 // remote (POSIX) and for local on Windows (the backend normalizes separators).
 // Import OS files (dragged in from the file manager) into `destDir` by sending
@@ -2674,8 +2690,8 @@ async function importExternalFiles(files, destSide, destDir) {
   const direction = destSide === "remote" ? "upload" : "download";
   conflictCache.clear();
   for (const file of files) {
-    if (file.size > 100 * 1024 * 1024) {
-      log(`${file.name} is too large to drag-import (100 MB limit for now).`, "error");
+    if (file.size > MAX_DRAG_IMPORT_BYTES) {
+      log(`${file.name} is too large to drag-import (${formatSize(MAX_DRAG_IMPORT_BYTES)} limit).`, "error");
       continue;
     }
     const srcModified = file.lastModified ? Math.floor(file.lastModified / 1000) : null;
@@ -2688,8 +2704,12 @@ async function importExternalFiles(files, destSide, destDir) {
     }
     try {
       log(`${destSide === "remote" ? "Uploading" : "Importing"} ${file.name}…`);
-      const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
-      await invoke("put_bytes", { id: activeTabId ?? 0, side: destSide, dir: destDir, name: r.name, data: bytes });
+      // Send the bytes as a raw IPC body (not a JSON number-array, which peaks
+      // at several times the file size in memory); routing metadata rides in a
+      // base64-encoded header.
+      const buf = await file.arrayBuffer();
+      const meta = encodeMeta({ id: activeTabId ?? 0, side: destSide, dir: destDir, name: r.name });
+      await invoke("put_bytes", buf, { headers: { "x-pb-meta": meta } });
       log(`Transfer complete: ${file.name}`, "success");
     } catch (e) {
       log(`Transfer failed: ${file.name} — ${e}`, "error");

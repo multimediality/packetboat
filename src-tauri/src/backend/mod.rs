@@ -26,6 +26,29 @@ pub fn config_dir() -> std::path::PathBuf {
         .join("Packetboat")
 }
 
+/// Reject a `name` that isn't a single, safe path component. Download
+/// destinations are built by joining a directory with a file name that
+/// originates from the *remote* server's listing; a name containing a path
+/// separator, or equal to "." / ".." / empty, could escape the target
+/// directory (path traversal) when a server is malicious or compromised. This
+/// is the backend's own guard — it does not depend on the frontend sanitizer.
+///
+/// `\` is only a path separator on Windows, so it's rejected only there (a Unix
+/// file may legitimately contain a backslash in its name).
+pub fn safe_component(name: &str) -> BackendResult<()> {
+    let bad_backslash = cfg!(windows) && name.contains('\\');
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\0')
+        || bad_backslash
+    {
+        return Err(BackendError::Other(format!("unsafe file name: {name:?}")));
+    }
+    Ok(())
+}
+
 /// A single entry in a directory listing. Shared by every backend and sent
 /// straight to the frontend as JSON.
 #[derive(Debug, Clone, Serialize)]
@@ -187,5 +210,38 @@ fn concise_opendal_error(e: &opendal::Error) -> String {
         format!("{trimmed}…")
     } else {
         trimmed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_component;
+
+    #[test]
+    fn safe_component_accepts_ordinary_names() {
+        for name in ["file.txt", "My Photo (1).jpg", "archive.tar.gz", ".hidden", "a.b.c"] {
+            assert!(safe_component(name).is_ok(), "should accept: {name}");
+        }
+    }
+
+    #[test]
+    fn safe_component_rejects_traversal_and_separators() {
+        for name in ["", ".", "..", "a/b", "../evil", "/etc/passwd", "with\0nul"] {
+            assert!(safe_component(name).is_err(), "should reject: {name:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn safe_component_rejects_backslash_on_windows() {
+        assert!(safe_component("a\\b").is_err());
+        assert!(safe_component("..\\..\\evil").is_err());
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn safe_component_allows_backslash_off_windows() {
+        // A backslash is a legal filename character on Unix.
+        assert!(safe_component("a\\b").is_ok());
     }
 }

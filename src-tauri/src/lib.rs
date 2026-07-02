@@ -14,7 +14,7 @@ use backend::cloud::OpendalBackend;
 use backend::ftp::{CertCapture, CertInfo, FtpBackend, FtpConfig};
 use backend::local::LocalBackend;
 use backend::sftp::{SftpBackend, SftpConfig};
-use backend::{BackendError, BackendResult, Entry, EntryKind, StorageBackend};
+use backend::{safe_component, BackendError, BackendResult, Entry, EntryKind, StorageBackend};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
@@ -236,6 +236,12 @@ struct TreeEntry {
     modified: Option<u64>,
 }
 
+/// Upper bound on entries returned by a single [`list_tree`] walk. Guards
+/// against a pathological or malicious remote tree exhausting memory (the walk
+/// buffers every entry before returning). Generous enough for any realistic
+/// folder; beyond it, the user is asked to transfer subfolders instead.
+const MAX_TREE_ENTRIES: usize = 200_000;
+
 /// Recursively list everything under `path` (for folder transfers). Directories
 /// are emitted before their contents so the caller can create them parent-first;
 /// symlinks are skipped to avoid cycles.
@@ -256,6 +262,17 @@ async fn list_tree(
     while let Some((dir, rel)) = stack.pop() {
         let entries = backend.list(&dir).await?;
         for e in entries {
+            // Skip entries whose name isn't a safe single component: a remote
+            // name containing a path separator or ".." would poison the relative
+            // path and let a folder download escape its destination directory.
+            if safe_component(&e.name).is_err() {
+                continue;
+            }
+            if out.len() >= MAX_TREE_ENTRIES {
+                return Err(BackendError::Other(format!(
+                    "folder has more than {MAX_TREE_ENTRIES} items — transfer subfolders instead"
+                )));
+            }
             let child_rel = if rel.is_empty() {
                 e.name.clone()
             } else {
@@ -339,37 +356,72 @@ fn set_transfer_limits(state: State<'_, AppState>, max: usize, downloads: usize,
     state.transfers.set_limits(max, downloads, uploads);
 }
 
-/// Write raw bytes to `dir`/`name` on the given side ("local" or "remote").
-/// Used for external drops (files dragged from the OS file manager), where the
-/// source path isn't available so the content is sent directly.
-#[tauri::command]
-async fn put_bytes(
-    state: State<'_, AppState>,
+/// Metadata for [`put_bytes`], carried in a base64-encoded JSON `x-pb-meta`
+/// header so the file bytes can travel as a raw IPC body instead of JSON.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PutBytesMeta {
+    #[serde(default)]
     id: u32,
+    /// "local" or "remote".
     side: String,
     dir: String,
     name: String,
-    data: Vec<u8>,
+}
+
+/// Write raw bytes to `dir`/`name` on the given side ("local" or "remote").
+/// Used for external drops (files dragged from the OS file manager), where the
+/// source path isn't available so the content is sent directly.
+///
+/// The file bytes arrive in the raw IPC body (`InvokeBody::Raw`) rather than a
+/// JSON number-array — a large file encoded as JSON numbers peaks at several
+/// times its size in memory. The small routing metadata rides in a
+/// base64-encoded JSON `x-pb-meta` header.
+#[tauri::command]
+async fn put_bytes(
+    state: State<'_, AppState>,
+    request: tauri::ipc::Request<'_>,
 ) -> BackendResult<()> {
-    let (backend, path): (Arc<dyn StorageBackend>, String) = if side == "remote" {
+    use base64::Engine;
+    let meta_b64 = request
+        .headers()
+        .get("x-pb-meta")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| BackendError::Other("missing upload metadata".into()))?;
+    let meta_json = base64::engine::general_purpose::STANDARD
+        .decode(meta_b64)
+        .map_err(|e| BackendError::Other(format!("bad upload metadata: {e}")))?;
+    let meta: PutBytesMeta = serde_json::from_slice(&meta_json)
+        .map_err(|e| BackendError::Other(format!("bad upload metadata: {e}")))?;
+
+    let data: &[u8] = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes.as_slice(),
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err(BackendError::Other("upload expects raw bytes".into()))
+        }
+    };
+
+    safe_component(&meta.name)?;
+    let (backend, path): (Arc<dyn StorageBackend>, String) = if meta.side == "remote" {
         (
-            remote_backend(&state, id).await?,
-            format!("{}/{}", dir.trim_end_matches('/'), name),
+            remote_backend(&state, meta.id).await?,
+            format!("{}/{}", meta.dir.trim_end_matches('/'), meta.name),
         )
     } else {
-        let path = std::path::Path::new(&dir)
-            .join(&name)
+        let path = std::path::Path::new(&meta.dir)
+            .join(&meta.name)
             .to_string_lossy()
             .into_owned();
         (Arc::new(LocalBackend), path)
     };
-    backend.write_file(&path, &data).await
+    backend.write_file(&path, data).await
 }
 
 // ---- File operations: local ----
 
 #[tauri::command]
 async fn local_mkdir(parent: String, name: String) -> BackendResult<()> {
+    safe_component(&name)?;
     let path = std::path::Path::new(&parent).join(&name);
     LocalBackend.mkdir(&path.to_string_lossy()).await
 }
@@ -381,6 +433,7 @@ async fn local_remove(path: String, dir: bool) -> BackendResult<()> {
 
 #[tauri::command]
 async fn local_rename(from: String, name: String) -> BackendResult<()> {
+    safe_component(&name)?;
     let to = std::path::Path::new(&from).with_file_name(&name);
     LocalBackend.rename(&from, &to.to_string_lossy()).await
 }
@@ -394,6 +447,7 @@ async fn remote_mkdir(
     parent: String,
     name: String,
 ) -> BackendResult<()> {
+    safe_component(&name)?;
     let backend = remote_backend(&state, id).await?;
     let path = format!("{}/{}", parent.trim_end_matches('/'), name);
     backend.mkdir(&path).await
@@ -417,6 +471,7 @@ async fn remote_rename(
     from: String,
     name: String,
 ) -> BackendResult<()> {
+    safe_component(&name)?;
     let backend = remote_backend(&state, id).await?;
     backend.rename(&from, &posix_with_name(&from, &name)).await
 }
@@ -445,16 +500,44 @@ fn sites_file() -> BackendResult<std::path::PathBuf> {
 
 #[tauri::command]
 fn sites_load() -> BackendResult<Vec<Site>> {
-    match std::fs::read(sites_file()?) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_default()),
-        Err(_) => Ok(Vec::new()),
+    let path = sites_file()?;
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => return Ok(Vec::new()), // no file yet (first run)
+    };
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    match serde_json::from_slice::<Vec<Site>>(&bytes) {
+        Ok(sites) => Ok(sites),
+        // A corrupt or half-written file must NOT be silently discarded: the
+        // next save would overwrite the only copy. Back it up (timestamped, so
+        // repeated attempts don't clobber an earlier backup) and report it, so
+        // the user knows their data was preserved.
+        Err(e) => {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let backup = path.with_file_name(format!("sites.json.corrupt-{stamp}.bak"));
+            let _ = std::fs::rename(&path, &backup);
+            Err(BackendError::Other(format!(
+                "Your saved sites file couldn't be read ({e}). A backup was saved to {} so nothing is lost; starting with an empty list.",
+                backup.display()
+            )))
+        }
     }
 }
 
 #[tauri::command]
 fn sites_save(sites: Vec<Site>) -> BackendResult<()> {
+    let path = sites_file()?;
     let json = serde_json::to_vec_pretty(&sites).map_err(|e| BackendError::Other(e.to_string()))?;
-    std::fs::write(sites_file()?, json)?;
+    // Write to a temp file then atomically rename over the target, so a crash
+    // partway through can't truncate or corrupt the existing sites file.
+    let tmp = path.with_file_name("sites.json.tmp");
+    std::fs::write(&tmp, &json)?;
+    std::fs::rename(&tmp, &path)?;
     Ok(())
 }
 
