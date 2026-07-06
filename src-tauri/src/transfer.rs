@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{async_runtime, AppHandle, Emitter};
@@ -28,6 +28,10 @@ const CHUNK: usize = 128 * 1024;
 
 /// Re-emit progress at most this often (by bytes) to avoid flooding the UI.
 const PROGRESS_STEP: u64 = 512 * 1024;
+
+/// Also re-emit progress on this time interval even if under [`PROGRESS_STEP`],
+/// so slow links still get regular updates (the UI derives speed from them).
+const PROGRESS_TICK: Duration = Duration::from_millis(500);
 
 /// How many times to automatically retry a transfer that fails with a transient
 /// (connection-like) error before giving up. Set fairly high because some
@@ -394,6 +398,7 @@ async fn run(
     let mut buf = vec![0u8; CHUNK];
     let mut transferred = req.resume_offset.unwrap_or(0);
     let mut last_emit = 0u64;
+    let mut last_emit_at = Instant::now();
     loop {
         let n = match guarded(reader.read(&mut buf), id, cancel).await? {
             Some(n) => n,
@@ -406,8 +411,11 @@ async fn run(
             return Ok(Outcome::Cancelled);
         }
         transferred += n as u64;
-        if transferred - last_emit >= PROGRESS_STEP {
+        if transferred - last_emit >= PROGRESS_STEP
+            || (transferred > last_emit && last_emit_at.elapsed() >= PROGRESS_TICK)
+        {
             last_emit = transferred;
+            last_emit_at = Instant::now();
             emit(
                 app,
                 Update::Progress {

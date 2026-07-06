@@ -1302,10 +1302,11 @@ input[type="number"]::-webkit-inner-spin-button {
   font-size: 13px;
 }
 
-/* Line 1: direction, name, size, progress, status, actions. */
+/* Line 1: direction, name, size, progress, status, actions. The status column
+   fits "100% · 999 MB · 99.9 MB/s" without clipping. */
 .q-head {
   display: grid;
-  grid-template-columns: 16px 1fr 80px 120px 96px 52px;
+  grid-template-columns: 16px 1fr 80px 120px 160px 52px;
   align-items: center;
   gap: 10px;
 }

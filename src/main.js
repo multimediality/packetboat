@@ -137,6 +137,10 @@ function formatSize(bytes) {
   return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
 }
 
+function formatSpeed(bytesPerSec) {
+  return `${formatSize(Math.round(bytesPerSec))}/s`;
+}
+
 function formatDate(secs) {
   if (!secs) return "";
   const d = new Date(secs * 1000);
@@ -2929,20 +2933,25 @@ function onTransferUpdate(u) {
     case "start": {
       setQueueStat(u.id, "Starting…");
       const it = queue.get(u.id);
-      if (it) log(`${it.direction === "download" ? "Downloading" : "Uploading"} ${it.name}…`);
+      if (it) {
+        it.rate = null;
+        log(`${it.direction === "download" ? "Downloading" : "Uploading"} ${it.name}…`);
+      }
       break;
     }
     case "progress":
       updateQueueProgress(u.id, u.transferred, u.size);
       break;
-    case "retry":
+    case "retry": {
       setQueueStat(u.id, `Retrying (${u.attempt}/${u.max})…`);
+      const it = queue.get(u.id);
+      if (it) it.rate = null;
       if (u.message) {
-        const it = queue.get(u.id);
         const what = it ? it.name : `transfer ${u.id}`;
         log(`Retrying ${what} (${u.attempt}/${u.max}): ${u.message}`, "error");
       }
       break;
+    }
     case "done": {
       const it = queue.get(u.id);
       if (it) {
@@ -3082,8 +3091,21 @@ function updateQueueProgress(id, transferred, size) {
   if (!it) return;
   const pct = size > 0 ? Math.min(100, Math.round((transferred / size) * 100)) : 0;
   it.fill.style.width = `${pct}%`;
+  // Derive speed from successive progress events, smoothed (EMA) so it reads
+  // steady rather than jumping with every network hiccup. A byte count lower
+  // than the last sample means the transfer restarted — drop the baseline.
+  const now = performance.now();
+  if (!it.rate || transferred < it.rate.bytes) {
+    it.rate = { t: now, bytes: transferred, speed: 0 };
+  } else if (now - it.rate.t >= 200) {
+    const inst = ((transferred - it.rate.bytes) * 1000) / (now - it.rate.t);
+    it.rate.speed = it.rate.speed ? it.rate.speed * 0.7 + inst * 0.3 : inst;
+    it.rate.t = now;
+    it.rate.bytes = transferred;
+  }
+  const speed = it.rate.speed ? ` · ${formatSpeed(it.rate.speed)}` : "";
   it.stat.textContent =
-    size > 0 ? `${pct}% · ${formatSize(transferred)}` : formatSize(transferred);
+    (size > 0 ? `${pct}% · ${formatSize(transferred)}` : formatSize(transferred)) + speed;
 }
 
 function setQueueStat(id, text) {
