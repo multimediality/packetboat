@@ -566,6 +566,44 @@ async fn remote_mkdir(
     backend.mkdir(&path).await
 }
 
+/// Create a batch of directories in one call, so the backend can pipeline the
+/// requests (SFTP multiplexes them over one session; cloud parallelizes HTTP)
+/// instead of paying an IPC + network round-trip per directory. `dirs` is
+/// (parent, name) pairs; returns per-dir `true` when the directory was
+/// actually created (`false` usually means it already existed). The batch may
+/// run concurrently, so callers send one tree level per call — parents in an
+/// earlier call than their children.
+#[tauri::command]
+async fn mkdir_many(
+    state: State<'_, AppState>,
+    id: u32,
+    side: String,
+    dirs: Vec<(String, String)>,
+) -> BackendResult<Vec<bool>> {
+    for (_, name) in &dirs {
+        safe_component(name)?;
+    }
+    let (backend, paths): (Arc<dyn StorageBackend>, Vec<String>) = if side == "remote" {
+        let paths = dirs
+            .iter()
+            .map(|(parent, name)| format!("{}/{}", parent.trim_end_matches('/'), name))
+            .collect();
+        (remote_backend(&state, id).await?, paths)
+    } else {
+        let paths = dirs
+            .iter()
+            .map(|(parent, name)| {
+                std::path::Path::new(parent)
+                    .join(name)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        (Arc::new(LocalBackend), paths)
+    };
+    Ok(backend.mkdir_many(&paths).await)
+}
+
 #[tauri::command]
 async fn remote_remove(
     state: State<'_, AppState>,
@@ -1045,6 +1083,7 @@ pub fn run() {
             local_mkdir,
             local_remove,
             local_rename,
+            mkdir_many,
             remote_mkdir,
             remote_remove,
             remote_rename,

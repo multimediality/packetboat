@@ -2857,11 +2857,26 @@ async function transferFolder(entry, sourceSide, destSide, destDir, batch = null
       log(`Could not read folder ${entry.name}: ${m.message}`, "error");
       break;
     }
-    for (const t of m.entries) {
-      if (t.kind === "dir") {
-        await safeMkdir(mkdirCmd, joinPath(destRoot, cleanRel(relParent(t.rel))), clean(relName(t.rel)));
-        continue;
+    // Each streamed batch is one directory's listing, so its dir entries are
+    // all siblings (their parent was created when its own entry streamed in an
+    // earlier batch) — create them with one pipelined mkdir_many instead of a
+    // round-trip each. A dir the call actually created is known-empty, so its
+    // files skip the conflict listing via the seeded cache entry. If the batch
+    // call fails, fall back to per-dir mkdir (same swallowed-error semantics).
+    const dirEnts = m.entries.filter((t) => t.kind === "dir");
+    if (dirEnts.length > 0) {
+      const dirs = dirEnts.map((t) => [joinPath(destRoot, cleanRel(relParent(t.rel))), clean(relName(t.rel))]);
+      try {
+        const made = await invoke("mkdir_many", { id: activeTabId ?? 0, side: destSide, dirs });
+        made.forEach((ok, i) => {
+          if (ok) conflictCache.set(`${destSide}:${joinPath(dirs[i][0], dirs[i][1])}`, new Map());
+        });
+      } catch (_) {
+        for (const [parent, name] of dirs) await safeMkdir(mkdirCmd, parent, name);
       }
+    }
+    for (const t of m.entries) {
+      if (t.kind === "dir") continue;
       const fileDestDir = joinPath(destRoot, cleanRel(relParent(t.rel)));
       const fileName = clean(relName(t.rel));
       const r = await resolveConflict(direction, destSide, fileDestDir, fileName, t.size, t.modified, t.path, batch);
@@ -2909,25 +2924,26 @@ function encodeMeta(obj) {
 
 // Path helpers for building destination paths. Joining with "/" is fine for
 // remote (POSIX) and for local on Windows (the backend normalizes separators).
-// Import OS files (dragged in from the file manager) into `destDir` by sending
-// their bytes — the webview can't see their real path, only their content.
-async function importExternalFiles(files, destSide, destDir) {
+// Import OS files (dragged in from the file manager) by sending their bytes —
+// the webview can't see their real path, only their content. `items` is
+// [{ file, dir }]: each File with its destination directory (folder drops
+// spread a tree across subdirectories; plain drops all share `destDir`).
+async function importExternalFiles(items, destSide, destDir) {
   if (!destDir) return;
   if (destSide === "remote" && !state.remote.connected) {
     setStatus("Connect to a server before uploading.", true);
     return;
   }
   const direction = destSide === "remote" ? "upload" : "download";
-  conflictCache.clear();
-  const batch = files.length > 1 ? {} : null;
-  for (const file of files) {
+  const batch = items.length > 1 ? {} : null;
+  for (const { file, dir } of items) {
     if (file.size > MAX_DRAG_IMPORT_BYTES) {
       log(`${file.name} is too large to drag-import (${formatSize(MAX_DRAG_IMPORT_BYTES)} limit).`, "error");
       continue;
     }
     const srcModified = file.lastModified ? Math.floor(file.lastModified / 1000) : null;
     // resumable=false: OS drops re-send the whole file via put_bytes (no append).
-    const r = await resolveConflict(direction, destSide, destDir, file.name, file.size, srcModified, file.name, batch, false);
+    const r = await resolveConflict(direction, destSide, dir, file.name, file.size, srcModified, file.name, batch, false);
     if (!r.proceed) {
       if (r.abort) {
         log("Import cancelled.");
@@ -2943,7 +2959,7 @@ async function importExternalFiles(files, destSide, destDir) {
       // at several times the file size in memory); routing metadata rides in a
       // base64-encoded header.
       const buf = await file.arrayBuffer();
-      const meta = encodeMeta({ id: activeTabId ?? 0, side: destSide, dir: destDir, name: r.name });
+      const meta = encodeMeta({ id: activeTabId ?? 0, side: destSide, dir, name: r.name });
       await invoke("put_bytes", buf, { headers: { "x-pb-meta": meta } });
       log(`Transfer complete: ${file.name}`, "success");
     } catch (e) {
@@ -2953,11 +2969,144 @@ async function importExternalFiles(files, destSide, destDir) {
   refresh(destSide);
 }
 
+// Flatten a dropped FileSystemEntry tree (webkitGetAsEntry) into `out.dirs`
+// (rel paths, parents before children) and `out.files` ([{ file, rel }]).
+// Fully parallel: sibling directories walk concurrently and every file
+// resolves concurrently — each entry.file()/readEntries is a browser IPC
+// round-trip, so awaiting them one at a time made big trees take seconds.
+// readEntries hands back children in batches (~100), so drain until empty.
+// Failures log and skip the entry (never reject), so a partially unreadable
+// tree still imports what it can and `out` is complete when this resolves.
+async function walkDroppedEntries(entries, rel, out) {
+  const tasks = [];
+  for (const entry of entries) {
+    if (entry.isDirectory) {
+      // Pushed before the child walk starts, so a parent always precedes its
+      // children in out.dirs even though branches interleave.
+      const sub = rel ? `${rel}/${entry.name}` : entry.name;
+      out.dirs.push(sub);
+      tasks.push(
+        (async () => {
+          const reader = entry.createReader();
+          const children = [];
+          try {
+            for (;;) {
+              const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+              if (!batch.length) break;
+              children.push(walkDroppedEntries(batch, sub, out));
+            }
+          } catch (e) {
+            log(`Could not read folder ${sub}: ${e}`, "error");
+          }
+          await Promise.all(children);
+        })(),
+      );
+    } else if (entry.isFile) {
+      tasks.push(
+        new Promise((res, rej) => entry.file(res, rej)).then(
+          (file) => {
+            out.files.push({ file, rel });
+          },
+          (e) => log(`Could not read ${rel ? `${rel}/` : ""}${entry.name} — ${e}`, "error"),
+        ),
+      );
+    }
+  }
+  await Promise.all(tasks);
+}
+
+// One OS-drop import at a time: the scan/mkdir phase of a folder drop takes a
+// while, and a second drop meanwhile would start an overlapping import that
+// fights the first with conflict prompts.
+let externalImportActive = false;
+async function runExternalImport(task) {
+  if (externalImportActive) {
+    log("Still importing the previous drop — this one was ignored.", "error");
+    return;
+  }
+  externalImportActive = true;
+  // One conflict-listing cache per drop (importExternalFiles no longer clears
+  // it itself — importExternalEntries seeds it with known-empty created dirs).
+  conflictCache.clear();
+  try {
+    await task();
+  } finally {
+    externalImportActive = false;
+  }
+}
+
+// Import an OS drop that contains folders: walk the dropped trees, recreate
+// the directory structure under destDir, then push the files through the same
+// conflict/put_bytes path as plain file drops. Entry names come straight from
+// the local filesystem, so no component can contain a separator or be "..".
+async function importExternalEntries(entries, destSide, destDir) {
+  if (!destDir) return;
+  if (destSide === "remote" && !state.remote.connected) {
+    setStatus("Connect to a server before uploading.", true);
+    return;
+  }
+  log(`Scanning ${entries.filter((e) => e.isDirectory).map((e) => e.name).join(", ")}…`);
+  const out = { dirs: [], files: [] };
+  await walkDroppedEntries(entries, "", out);
+  if (out.files.length > 0) {
+    const nf = out.files.length;
+    const nd = out.dirs.length;
+    log(`Found ${nf} file${nf === 1 ? "" : "s"} in ${nd} folder${nd === 1 ? "" : "s"} — preparing folders…`);
+  }
+  // Create the tree one level at a time (parents before their children), each
+  // level as a single mkdir_many call the backend can pipeline — a round-trip
+  // per directory is what made big drops crawl. A dir the batch actually
+  // CREATED is known-empty, so its files skip the conflict listing via a
+  // seeded cache entry; one that already existed just lists on demand.
+  const levels = [];
+  for (const d of out.dirs) {
+    const depth = d.split("/").length - 1;
+    (levels[depth] ||= []).push(d);
+  }
+  for (const level of levels) {
+    if (!level) continue;
+    const dirs = level.map((d) => [joinPath(destDir, relParent(d)), relName(d)]);
+    try {
+      const created = await invoke("mkdir_many", { id: activeTabId ?? 0, side: destSide, dirs });
+      created.forEach((ok, i) => {
+        if (ok) conflictCache.set(`${destSide}:${joinPath(destDir, level[i])}`, new Map());
+      });
+    } catch (e) {
+      log(`Could not create folders: ${e}`, "error");
+      refresh(destSide);
+      return;
+    }
+  }
+  if (out.files.length === 0) {
+    log("Dropped folder has no files to transfer.");
+    refresh(destSide);
+    return;
+  }
+  log("Folders ready — checking for existing files…");
+  await importExternalFiles(
+    out.files.map(({ file, rel }) => ({ file, dir: joinPath(destDir, rel) })),
+    destSide,
+    destDir,
+  );
+}
+
 // Unified drop target: OS files take priority, else an in-app dragged file.
 function handleDrop(ev, destSide, destDir) {
+  // Folder drops need the entry API, and the item list is only readable while
+  // the drop event is live — capture entries synchronously, before any await.
+  const items = ev.dataTransfer.items;
+  const entries = items
+    ? [...items].map((it) => (it.webkitGetAsEntry ? it.webkitGetAsEntry() : null)).filter(Boolean)
+    : [];
+  if (entries.some((e) => e.isDirectory)) {
+    runExternalImport(() => importExternalEntries(entries, destSide, destDir));
+    return;
+  }
   const files = ev.dataTransfer.files;
   if (files && files.length > 0) {
-    importExternalFiles(files, destSide, destDir);
+    runExternalImport(() =>
+      importExternalFiles([...files].map((file) => ({ file, dir: destDir })), destSide, destDir),
+    );
   } else if (dragItems && dragItems.length && dragItems[0].side !== destSide) {
     transferManyTo(dragItems, dragItems[0].side, destSide, destDir);
   }

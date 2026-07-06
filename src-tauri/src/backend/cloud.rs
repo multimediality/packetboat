@@ -129,6 +129,16 @@ impl StorageBackend for OpendalBackend {
         Ok(())
     }
 
+    async fn mkdir_many(&self, paths: &[String]) -> Vec<bool> {
+        // No connection to serialize on — create the dir markers with
+        // parallel requests.
+        let futs = paths.iter().map(|p| {
+            let dir = to_dir(p);
+            async move { self.op.create_dir(&dir).await.is_ok() }
+        });
+        futures_util::future::join_all(futs).await
+    }
+
     async fn remove(&self, path: &str, is_dir: bool) -> BackendResult<()> {
         let p = if is_dir { to_dir(path) } else { to_file(path) };
         self.op.delete(&p).await?;

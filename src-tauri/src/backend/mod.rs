@@ -131,6 +131,21 @@ pub trait StorageBackend: Send + Sync {
 
     async fn mkdir(&self, path: &str) -> BackendResult<()>;
 
+    /// Create a batch of directories, returning per-path success (`true` =
+    /// actually created). Bulk operations (folder drops) use this so backends
+    /// that can pipeline requests over one connection don't pay a full network
+    /// round-trip per directory. A failure ("already exists", usually) is a
+    /// per-path result, not an error. Backends may create the batch
+    /// concurrently, so callers must not put a directory and its parent in the
+    /// same call — send one tree level at a time.
+    async fn mkdir_many(&self, paths: &[String]) -> Vec<bool> {
+        let mut out = Vec::with_capacity(paths.len());
+        for p in paths {
+            out.push(self.mkdir(p).await.is_ok());
+        }
+        out
+    }
+
     async fn remove(&self, path: &str, is_dir: bool) -> BackendResult<()>;
 
     async fn rename(&self, from: &str, to: &str) -> BackendResult<()>;

@@ -176,6 +176,20 @@ impl StorageBackend for SftpBackend {
         Ok(())
     }
 
+    async fn mkdir_many(&self, paths: &[String]) -> Vec<bool> {
+        // One lock for the whole batch: SftpSession multiplexes concurrent
+        // requests over the channel (matched by request id), so firing them
+        // together pipelines the round-trips instead of paying one per
+        // directory.
+        let sftp = self.sftp.lock().await;
+        let futs = paths.iter().map(|p| sftp.create_dir(p.to_string()));
+        futures_util::future::join_all(futs)
+            .await
+            .into_iter()
+            .map(|r| r.is_ok())
+            .collect()
+    }
+
     async fn remove(&self, path: &str, is_dir: bool) -> BackendResult<()> {
         let sftp = self.sftp.lock().await;
         if is_dir {
