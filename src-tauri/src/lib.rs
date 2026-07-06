@@ -8,7 +8,7 @@ mod transfer;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use backend::cloud::OpendalBackend;
 use backend::ftp::{CertCapture, CertInfo, FtpBackend, FtpConfig};
@@ -84,6 +84,9 @@ struct AppState {
     connections: Connections,
     next_id: AtomicU32,
     transfers: TransferManager,
+    /// Cancel flags for running [`list_tree`] walks, keyed by the caller's
+    /// walk id — set via [`cancel_tree`] when a folder transfer is abandoned.
+    tree_cancels: StdMutex<HashMap<u64, Arc<AtomicBool>>>,
 }
 
 /// Result of opening a connection: its id (the tab/connection handle) and the
@@ -276,7 +279,7 @@ async fn list_local(path: String) -> BackendResult<Vec<Entry>> {
 
 /// One node in a recursive directory walk. `rel` is the path relative to the
 /// walked root (POSIX-style), used to recreate the tree on the destination.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct TreeEntry {
     path: String,
     rel: String,
@@ -285,31 +288,77 @@ struct TreeEntry {
     modified: Option<u64>,
 }
 
-/// Upper bound on entries returned by a single [`list_tree`] walk. Guards
-/// against a pathological or malicious remote tree exhausting memory (the walk
-/// buffers every entry before returning). Generous enough for any realistic
-/// folder; beyond it, the user is asked to transfer subfolders instead.
+/// Upper bound on entries emitted by a single [`list_tree`] walk. Guards
+/// against a pathological or malicious remote tree (e.g. one that lists
+/// endlessly) keeping the walk running forever. Generous enough for any
+/// realistic folder; beyond it, the user is asked to transfer subfolders
+/// instead.
 const MAX_TREE_ENTRIES: usize = 200_000;
 
-/// Recursively list everything under `path` (for folder transfers). Directories
-/// are emitted before their contents so the caller can create them parent-first;
-/// symlinks are skipped to avoid cycles.
+/// One message on the [`list_tree`] streaming channel: a batch of entries from
+/// one directory listing, the end of the walk, or a fatal error. Everything
+/// (errors included) arrives on the channel so the caller consumes one ordered
+/// stream and can start transfers from early batches while the walk continues.
+#[derive(Clone, Serialize)]
+#[serde(tag = "event", rename_all = "lowercase")]
+enum TreeMsg {
+    Batch { entries: Vec<TreeEntry> },
+    Done,
+    Error { message: String },
+}
+
+/// Recursively list everything under `path` (for folder transfers), streaming
+/// one batch per listed directory over `on_batch`. Directories are emitted
+/// before their contents so the caller can create them parent-first; symlinks
+/// are skipped to avoid cycles. [`cancel_tree`] with the same `walk_id` stops
+/// the walk early (the user abandoned the transfer).
 #[tauri::command]
 async fn list_tree(
     state: State<'_, AppState>,
     side: String,
     id: u32,
     path: String,
-) -> BackendResult<Vec<TreeEntry>> {
+    walk_id: u64,
+    on_batch: tauri::ipc::Channel<TreeMsg>,
+) -> Result<(), ()> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    state
+        .tree_cancels
+        .lock()
+        .unwrap()
+        .insert(walk_id, cancelled.clone());
+    let result = walk_tree(&state, side, id, path, &cancelled, &on_batch).await;
+    state.tree_cancels.lock().unwrap().remove(&walk_id);
+    let _ = on_batch.send(match result {
+        Ok(()) => TreeMsg::Done,
+        Err(e) => TreeMsg::Error {
+            message: e.to_string(),
+        },
+    });
+    Ok(())
+}
+
+async fn walk_tree(
+    state: &AppState,
+    side: String,
+    id: u32,
+    path: String,
+    cancelled: &AtomicBool,
+    on_batch: &tauri::ipc::Channel<TreeMsg>,
+) -> BackendResult<()> {
     let backend: Arc<dyn StorageBackend> = if side == "local" {
         Arc::new(LocalBackend)
     } else {
-        remote_backend(&state, id).await?
+        remote_backend(state, id).await?
     };
-    let mut out = Vec::new();
+    let mut total = 0usize;
     let mut stack = vec![(path, String::new())];
     while let Some((dir, rel)) = stack.pop() {
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let entries = backend.list(&dir).await?;
+        let mut batch = Vec::new();
         for e in entries {
             // Skip entries whose name isn't a safe single component: a remote
             // name containing a path separator or ".." would poison the relative
@@ -317,11 +366,12 @@ async fn list_tree(
             if safe_component(&e.name).is_err() {
                 continue;
             }
-            if out.len() >= MAX_TREE_ENTRIES {
+            if total >= MAX_TREE_ENTRIES {
                 return Err(BackendError::Other(format!(
                     "folder has more than {MAX_TREE_ENTRIES} items — transfer subfolders instead"
                 )));
             }
+            total += 1;
             let child_rel = if rel.is_empty() {
                 e.name.clone()
             } else {
@@ -329,7 +379,7 @@ async fn list_tree(
             };
             match e.kind {
                 EntryKind::Dir => {
-                    out.push(TreeEntry {
+                    batch.push(TreeEntry {
                         path: e.path.clone(),
                         rel: child_rel.clone(),
                         kind: e.kind,
@@ -338,7 +388,7 @@ async fn list_tree(
                     });
                     stack.push((e.path, child_rel));
                 }
-                EntryKind::File => out.push(TreeEntry {
+                EntryKind::File => batch.push(TreeEntry {
                     path: e.path,
                     rel: child_rel,
                     kind: e.kind,
@@ -348,8 +398,22 @@ async fn list_tree(
                 EntryKind::Symlink => {}
             }
         }
+        if !batch.is_empty() {
+            on_batch
+                .send(TreeMsg::Batch { entries: batch })
+                .map_err(|e| BackendError::Other(e.to_string()))?;
+        }
     }
-    Ok(out)
+    Ok(())
+}
+
+/// Stop a running [`list_tree`] walk. Unknown ids (already finished) are a
+/// no-op.
+#[tauri::command]
+fn cancel_tree(state: State<'_, AppState>, walk_id: u64) {
+    if let Some(flag) = state.tree_cancels.lock().unwrap().get(&walk_id) {
+        flag.store(true, Ordering::Relaxed);
+    }
 }
 
 #[tauri::command]
@@ -926,6 +990,7 @@ pub fn run() {
                 connections,
                 next_id: AtomicU32::new(1),
                 transfers,
+                tree_cancels: StdMutex::new(HashMap::new()),
             });
             // Register our Windows toast identity (name + icon) up front so the
             // first notification already attributes to Packetboat.
@@ -966,6 +1031,7 @@ pub fn run() {
             trust_host_key,
             connect_opendal,
             list_tree,
+            cancel_tree,
             disconnect,
             list_remote,
             list_local,

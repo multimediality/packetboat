@@ -22,6 +22,9 @@ const invoke = window.__TAURI__
   : async () => {
       throw new Error("Tauri API unavailable (run inside the app)");
     };
+// Streaming-command channel; the dummy keeps construction from throwing outside
+// Tauri (the paired invoke rejects with the real error).
+const TauriChannel = window.__TAURI__ ? window.__TAURI__.core.Channel : class {};
 const tauriEvent = window.__TAURI__ ? window.__TAURI__.event : null;
 
 const state = {
@@ -2609,10 +2612,12 @@ function sanitizeRelPath(rel) {
 
 // Build a non-colliding "name (n).ext" within the destination directory.
 // Decide what to do with a file whose target may already exist. Returns
-// { proceed, name, resumeOffset? } — `name` may be a renamed copy, proceed:false
-// means skip, resumeOffset means continue an interrupted transfer from that byte.
-// `allowPrompt` is false for batch (folder) transfers so they don't prompt per
-// file — they fall back to overwrite when the policy is "ask". `resumable` is
+// { proceed, name, resumeOffset?, abort? } — `name` may be a renamed copy,
+// proceed:false means skip, resumeOffset means continue an interrupted transfer
+// from that byte. `batch` groups related transfers (a folder tree, a multi-item
+// drop): the first conflict prompts with a "for this transfer" scope that
+// applies the answer to the rest of the batch, and Cancel aborts the batch
+// (abort:true, batch.aborted set for the caller's loop). `resumable` is
 // false for paths that can't resume (OS drag-drop via put_bytes).
 // Conflict action chosen "for this session" (per direction). Shadows the saved
 // default without persisting — cleared on restart or when the default changes.
@@ -2626,10 +2631,12 @@ async function resolveConflict(
   srcSize,
   srcModified,
   srcPath,
-  allowPrompt,
+  batch = null,
   resumable = true,
 ) {
+  if (batch && batch.aborted) return { proceed: false, abort: true };
   let policy =
+    (batch && batch.action) ||
     sessionConflict[direction] ||
     (direction === "download" ? settings.conflictDownload : settings.conflictUpload);
   if (policy === "overwrite") return { proceed: true, name };
@@ -2643,10 +2650,16 @@ async function resolveConflict(
   const canResume = resumable && (direction === "download" || !(activeTab() && activeTab().cloud));
 
   if (policy === "ask") {
-    if (!allowPrompt) return { proceed: true, name };
-    const choice = await promptConflict({ direction, name, destDir, srcSize, srcModified, srcPath, target, canResume });
-    if (!choice) return { proceed: false }; // cancelled
-    if (choice.scope === "session") {
+    const choice = await promptConflict({ direction, name, destDir, srcSize, srcModified, srcPath, target, canResume, inBatch: !!batch });
+    if (!choice) {
+      // Cancelled. For a batch that means "stop the whole thing", not "skip
+      // this file and ask me again for the next one".
+      if (batch) batch.aborted = true;
+      return { proceed: false, abort: !!batch };
+    }
+    if (choice.scope === "batch" && batch) {
+      batch.action = choice.action; // rest of this folder/drop only
+    } else if (choice.scope === "session") {
       sessionConflict[direction] = choice.action; // this run only, not saved
     } else if (choice.scope === "always") {
       if (direction === "download") settings.conflictDownload = choice.action;
@@ -2682,8 +2695,9 @@ async function resolveConflict(
 }
 
 // "Target file already exists" prompt. Resolves to
-// { action, scope } (scope: "once" | "session" | "always") or null if cancelled.
-function promptConflict({ direction, name, destDir, srcSize, srcModified, srcPath, target, canResume }) {
+// { action, scope } (scope: "once" | "batch" | "session" | "always") or null if
+// cancelled. "batch" is only offered when the transfer is part of one (inBatch).
+function promptConflict({ direction, name, destDir, srcSize, srcModified, srcPath, target, canResume, inBatch }) {
   return new Promise((resolve) => {
     const srcSideName = direction === "upload" ? "Local (source)" : "Remote (source)";
     const dstSideName = direction === "upload" ? "Remote (target)" : "Local (target)";
@@ -2721,6 +2735,7 @@ function promptConflict({ direction, name, destDir, srcSize, srcModified, srcPat
       '<label class="field-toggle"><span>Remember this choice</span>' +
       '<select id="cf-scope" class="cf-scope">' +
       '<option value="once">Just this time</option>' +
+      (inBatch ? '<option value="batch" selected>For this transfer</option>' : "") +
       '<option value="session">For this session</option>' +
       '<option value="always">Always (save as default)</option>' +
       "</select></label>" +
@@ -2752,15 +2767,16 @@ function promptConflict({ direction, name, destDir, srcSize, srcModified, srcPat
   });
 }
 
-// Transfer `entry` from `sourceSide` into `destDir` on `destSide`.
-async function transferTo(entry, sourceSide, destSide, destDir) {
+// Transfer `entry` from `sourceSide` into `destDir` on `destSide`. `batch`
+// (from a multi-item drop) shares one conflict answer across the drop.
+async function transferTo(entry, sourceSide, destSide, destDir, batch = null) {
   if (sourceSide === destSide || !destDir) return;
   if (destSide === "remote" && !state.remote.connected) {
     setStatus("Connect to a server before uploading.", true);
     return;
   }
   if (entry.kind === "dir") {
-    await transferFolder(entry, sourceSide, destSide, destDir);
+    await transferFolder(entry, sourceSide, destSide, destDir, batch);
     return;
   }
   const direction = destSide === "remote" ? "upload" : "download";
@@ -2776,9 +2792,10 @@ async function transferTo(entry, sourceSide, destSide, destDir) {
     entry.size,
     entry.modified,
     entry.path,
-    true,
+    batch,
   );
   if (!r.proceed) {
+    if (r.abort) return; // batch cancelled — the caller's loop stops
     addSkippedRow(direction, entry.name, entry.size);
     log(`Skipped ${entry.name} — target already exists.`);
     return;
@@ -2788,46 +2805,79 @@ async function transferTo(entry, sourceSide, destSide, destDir) {
 
 // Recursively transfer a folder: walk the source subtree once, recreate its
 // directories on the destination (parents first), then queue every file.
-async function transferFolder(entry, sourceSide, destSide, destDir) {
+// Monotonic id for list_tree walks, so an abandoned folder transfer can stop
+// its backend walk (cancel_tree) instead of letting it keep listing.
+let treeWalkId = 0;
+
+async function transferFolder(entry, sourceSide, destSide, destDir, batch = null) {
+  batch = batch || {}; // a folder is a batch of its own even when dropped alone
   const direction = destSide === "remote" ? "upload" : "download";
   log(`Scanning folder ${entry.name}…`);
-  let tree;
-  try {
-    tree = await invoke("list_tree", { side: sourceSide, id: activeTabId, path: entry.path });
-  } catch (e) {
-    log(`Could not read folder ${entry.name}: ${e}`, "error");
-    return;
-  }
-  // Recreate the destination directory tree. entry.name is the new root; the
-  // walk lists directories before their children, so parents come first. When
-  // downloading, sanitize every dest name/component so server names with
-  // Windows-forbidden characters land on disk (source paths stay original).
+  // Recreate the destination directory tree as it streams in. entry.name is the
+  // new root; the walk lists directories before their children, so parents come
+  // first. When downloading, sanitize every dest name/component so server names
+  // with Windows-forbidden characters land on disk (source paths stay original).
   const clean = direction === "download" ? sanitizeLocalName : (s) => s;
   const cleanRel = direction === "download" ? sanitizeRelPath : (s) => s;
   const mkdirCmd = destSide === "local" ? "local_mkdir" : "remote_mkdir";
   const destRoot = joinPath(destDir, clean(entry.name));
   await safeMkdir(mkdirCmd, destDir, clean(entry.name));
-  for (const t of tree) {
-    if (t.kind !== "dir") continue;
-    await safeMkdir(mkdirCmd, joinPath(destRoot, cleanRel(relParent(t.rel))), clean(relName(t.rel)));
-  }
+
+  // The walk streams one batch per listed directory, so the first files start
+  // transferring while deeper directories are still being scanned. Messages
+  // buffer in order while this loop awaits (mkdirs, conflict prompts); the walk
+  // signals completion with a final done/error message on the same channel.
+  const walkId = ++treeWalkId;
+  const messages = [];
+  let wake = null;
+  const chan = new TauriChannel();
+  chan.onmessage = (m) => {
+    messages.push(m);
+    if (wake) {
+      const w = wake;
+      wake = null;
+      w();
+    }
+  };
+  invoke("list_tree", { side: sourceSide, id: activeTabId, path: entry.path, walkId, onBatch: chan }).catch(
+    (e) => chan.onmessage({ event: "error", message: String(e) }),
+  );
+
   // Queue every file into its destination subdirectory, applying the file-exists
-  // policy per file (folders don't prompt — they overwrite when policy is "ask").
+  // policy per file. On "ask", the first conflict prompts once with a
+  // "for this transfer" scope covering the rest of the folder.
   conflictCache.clear();
   let count = 0;
   let skipped = 0;
-  for (const t of tree) {
-    if (t.kind !== "file") continue;
-    const fileDestDir = joinPath(destRoot, cleanRel(relParent(t.rel)));
-    const fileName = clean(relName(t.rel));
-    const r = await resolveConflict(direction, destSide, fileDestDir, fileName, t.size, t.modified, t.path, false);
-    if (!r.proceed) {
-      addSkippedRow(direction, fileName, t.size);
-      skipped++;
-      continue;
+  for (;;) {
+    while (messages.length === 0) await new Promise((r) => (wake = r));
+    const m = messages.shift();
+    if (m.event === "done") break;
+    if (m.event === "error") {
+      log(`Could not read folder ${entry.name}: ${m.message}`, "error");
+      break;
     }
-    await enqueue(direction, t.path, fileDestDir, r.name, t.size, r.resumeOffset);
-    count++;
+    for (const t of m.entries) {
+      if (t.kind === "dir") {
+        await safeMkdir(mkdirCmd, joinPath(destRoot, cleanRel(relParent(t.rel))), clean(relName(t.rel)));
+        continue;
+      }
+      const fileDestDir = joinPath(destRoot, cleanRel(relParent(t.rel)));
+      const fileName = clean(relName(t.rel));
+      const r = await resolveConflict(direction, destSide, fileDestDir, fileName, t.size, t.modified, t.path, batch);
+      if (!r.proceed) {
+        if (r.abort) {
+          invoke("cancel_tree", { walkId }).catch(() => {});
+          log(`Cancelled ${entry.name} — ${count} file${count === 1 ? "" : "s"} already queued.`);
+          return;
+        }
+        addSkippedRow(direction, fileName, t.size);
+        skipped++;
+        continue;
+      }
+      await enqueue(direction, t.path, fileDestDir, r.name, t.size, r.resumeOffset);
+      count++;
+    }
   }
   const skipNote = skipped ? ` (${skipped} skipped)` : "";
   if (count === 0 && skipped === 0) log(`${entry.name} has no files to transfer.`);
@@ -2869,6 +2919,7 @@ async function importExternalFiles(files, destSide, destDir) {
   }
   const direction = destSide === "remote" ? "upload" : "download";
   conflictCache.clear();
+  const batch = files.length > 1 ? {} : null;
   for (const file of files) {
     if (file.size > MAX_DRAG_IMPORT_BYTES) {
       log(`${file.name} is too large to drag-import (${formatSize(MAX_DRAG_IMPORT_BYTES)} limit).`, "error");
@@ -2876,8 +2927,12 @@ async function importExternalFiles(files, destSide, destDir) {
     }
     const srcModified = file.lastModified ? Math.floor(file.lastModified / 1000) : null;
     // resumable=false: OS drops re-send the whole file via put_bytes (no append).
-    const r = await resolveConflict(direction, destSide, destDir, file.name, file.size, srcModified, file.name, true, false);
+    const r = await resolveConflict(direction, destSide, destDir, file.name, file.size, srcModified, file.name, batch, false);
     if (!r.proceed) {
+      if (r.abort) {
+        log("Import cancelled.");
+        break;
+      }
       addSkippedRow(direction, file.name, file.size);
       log(`Skipped ${file.name} — target already exists.`);
       continue;
@@ -2909,8 +2964,15 @@ function handleDrop(ev, destSide, destDir) {
 }
 
 async function transferManyTo(items, srcSide, destSide, destDir) {
+  // One batch per drop: a "for this transfer" answer in the conflict prompt
+  // covers every dropped item, and Cancel abandons the rest of the drop.
+  const batch = items.length > 1 ? {} : null;
   for (const item of items) {
-    await transferTo(item, srcSide, destSide, destDir);
+    await transferTo(item, srcSide, destSide, destDir, batch);
+    if (batch && batch.aborted) {
+      log("Transfer cancelled.");
+      return;
+    }
   }
 }
 
@@ -3304,13 +3366,29 @@ async function renameEntry(entry, side) {
   }
 }
 
+// Collect a full list_tree walk into one array, for callers that need the
+// whole tree before acting (unlike folder transfers, which consume the stream
+// incrementally). Rejects on a walk error.
+function collectTree(side, path) {
+  return new Promise((resolve, reject) => {
+    const out = [];
+    const chan = new TauriChannel();
+    chan.onmessage = (m) => {
+      if (m.event === "batch") out.push(...m.entries);
+      else if (m.event === "done") resolve(out);
+      else reject(new Error(m.message));
+    };
+    invoke("list_tree", { side, id: activeTabId, path, walkId: ++treeWalkId, onBatch: chan }).catch(reject);
+  });
+}
+
 // Delete an entry. The local backend removes folders recursively already; remote
 // backends' rmdir/RMD is not recursive, so for a remote folder we walk its tree
 // (list_tree returns full backend-native paths, parents before children) and
 // delete files first, then directories deepest-first, then the folder itself.
 async function removeEntry(entry, side) {
   if (entry.kind === "dir" && side !== "local") {
-    const tree = await invoke("list_tree", { side, id: activeTabId, path: entry.path });
+    const tree = await collectTree(side, entry.path);
     const rm = (path, dir) => invoke("remote_remove", { id: activeTabId, path, dir });
     for (const t of tree) if (t.kind !== "dir") await rm(t.path, false);
     for (const t of [...tree].reverse()) if (t.kind === "dir") await rm(t.path, true);

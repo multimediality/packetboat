@@ -1303,10 +1303,10 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 
 /* Line 1: direction, name, size, progress, status, actions. The status column
-   fits "100% · 999 MB · 99.9 MB/s" without clipping. */
+   fits "100% · 1023 MB · 99.9 MB/s" in Space Mono without wrapping. */
 .q-head {
   display: grid;
-  grid-template-columns: 16px 1fr 80px 120px 160px 52px;
+  grid-template-columns: 16px 1fr 80px 120px 200px 52px;
   align-items: center;
   gap: 10px;
 }
@@ -1429,6 +1429,7 @@ input[type="number"]::-webkit-inner-spin-button {
   font-size: 12px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .q-row[data-status="success"] .q-fill {
