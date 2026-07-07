@@ -3644,14 +3644,18 @@ async function renameEntry(entry, side) {
 
 // Collect a full list_tree walk into one array, for callers that need the
 // whole tree before acting (unlike folder transfers, which consume the stream
-// incrementally). Rejects on a walk error.
-function collectTree(side, path) {
+// incrementally). Rejects on a walk error. `onProgress(dirsListed, items)`
+// fires per streamed batch so long scans can show life.
+function collectTree(side, path, onProgress = null) {
   return new Promise((resolve, reject) => {
     const out = [];
+    let batches = 0;
     const chan = new TauriChannel();
     chan.onmessage = (m) => {
-      if (m.event === "batch") out.push(...m.entries);
-      else if (m.event === "done") resolve(out);
+      if (m.event === "batch") {
+        out.push(...m.entries);
+        if (onProgress) onProgress(++batches, out.length);
+      } else if (m.event === "done") resolve(out);
       else reject(new Error(m.message));
     };
     invoke("list_tree", { side, id: activeTabId, path, walkId: ++treeWalkId, onBatch: chan }).catch(reject);
@@ -3684,7 +3688,9 @@ function makeLimiter(max) {
 async function removeEntry(entry, side) {
   if (entry.kind === "dir" && side !== "local") {
     log(`Deleting ${entry.name} — scanning…`);
-    const tree = await collectTree(side, entry.path);
+    const tree = await collectTree(side, entry.path, (dirs, items) => {
+      if (dirs % 20 === 0) setStatus(`Deleting ${entry.name} — scanned ${dirs} folders (${items} items)…`);
+    });
     const files = tree.filter((t) => t.kind !== "dir");
     const dirs = tree.filter((t) => t.kind === "dir");
     log(`Deleting ${files.length} file${files.length === 1 ? "" : "s"} in ${dirs.length + 1} folder${dirs.length === 0 ? "" : "s"}…`);

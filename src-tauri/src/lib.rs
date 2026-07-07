@@ -338,6 +338,13 @@ async fn list_tree(
     Ok(())
 }
 
+/// How many directory listings a tree walk keeps in flight. A listing is
+/// several round-trips, so overlapping them is the difference between seconds
+/// and a minute on big trees. SFTP multiplexes them over one session; local
+/// and cloud parallelize naturally; FTP serializes on its control-connection
+/// mutex either way, so it's simply unaffected.
+const WALK_CONCURRENCY: usize = 8;
+
 async fn walk_tree(
     state: &AppState,
     side: String,
@@ -352,12 +359,24 @@ async fn walk_tree(
         remote_backend(state, id).await?
     };
     let mut total = 0usize;
-    let mut stack = vec![(path, String::new())];
-    while let Some((dir, rel)) = stack.pop() {
+    // Directories waiting to be listed, plus listings in flight. A directory
+    // is only queued after its own entry went out in its parent's batch, so
+    // the ordered channel still delivers a parent before its children's
+    // contents — the invariant folder transfers rely on for mkdir order.
+    let mut pending = vec![(path, String::new())];
+    let mut in_flight = tokio::task::JoinSet::new();
+    loop {
         if cancelled.load(Ordering::Relaxed) {
-            return Ok(());
+            return Ok(()); // dropping the JoinSet aborts in-flight listings
         }
-        let entries = backend.list(&dir).await?;
+        while in_flight.len() < WALK_CONCURRENCY {
+            let Some((dir, rel)) = pending.pop() else { break };
+            let b = backend.clone();
+            in_flight.spawn(async move { (rel, b.list(&dir).await) });
+        }
+        let Some(joined) = in_flight.join_next().await else { break };
+        let (rel, listed) = joined.map_err(|e| BackendError::Other(e.to_string()))?;
+        let entries = listed?;
         let mut batch = Vec::new();
         for e in entries {
             // Skip entries whose name isn't a safe single component: a remote
@@ -386,7 +405,7 @@ async fn walk_tree(
                         size: 0,
                         modified: None,
                     });
-                    stack.push((e.path, child_rel));
+                    pending.push((e.path, child_rel));
                 }
                 EntryKind::File => batch.push(TreeEntry {
                     path: e.path,
