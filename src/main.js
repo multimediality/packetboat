@@ -3658,17 +3658,60 @@ function collectTree(side, path) {
   });
 }
 
+// A tiny concurrency gate: run async tasks at most `max` at a time.
+function makeLimiter(max) {
+  let active = 0;
+  const waiters = [];
+  return async (fn) => {
+    while (active >= max) await new Promise((r) => waiters.push(r));
+    active++;
+    try {
+      return await fn();
+    } finally {
+      active--;
+      const w = waiters.shift();
+      if (w) w();
+    }
+  };
+}
+
 // Delete an entry. The local backend removes folders recursively already; remote
 // backends' rmdir/RMD is not recursive, so for a remote folder we walk its tree
 // (list_tree returns full backend-native paths, parents before children) and
 // delete files first, then directories deepest-first, then the folder itself.
+// Deletions run a few at a time — SFTP pipelines them over its one session;
+// FTP serializes on its control connection either way, so it's unaffected.
 async function removeEntry(entry, side) {
   if (entry.kind === "dir" && side !== "local") {
+    log(`Deleting ${entry.name} — scanning…`);
     const tree = await collectTree(side, entry.path);
+    const files = tree.filter((t) => t.kind !== "dir");
+    const dirs = tree.filter((t) => t.kind === "dir");
+    log(`Deleting ${files.length} file${files.length === 1 ? "" : "s"} in ${dirs.length + 1} folder${dirs.length === 0 ? "" : "s"}…`);
     const rm = (path, dir) => invoke("remote_remove", { id: activeTabId, path, dir });
-    for (const t of tree) if (t.kind !== "dir") await rm(t.path, false);
-    for (const t of [...tree].reverse()) if (t.kind === "dir") await rm(t.path, true);
+    const limited = makeLimiter(8);
+    let done = 0;
+    await Promise.all(
+      files.map((t) =>
+        limited(async () => {
+          await rm(t.path, false);
+          done++;
+          if (done % 50 === 0) setStatus(`Deleting ${entry.name} — ${done}/${files.length} files…`);
+        }),
+      ),
+    );
+    // Directories deepest-first; siblings at one depth can go concurrently.
+    const levels = [];
+    for (const d of dirs) {
+      const depth = d.rel.split("/").length;
+      (levels[depth] ||= []).push(d);
+    }
+    for (const level of [...levels].reverse()) {
+      if (!level) continue;
+      await Promise.all(level.map((d) => limited(() => rm(d.path, true))));
+    }
     await rm(entry.path, true);
+    log(`Deleted ${entry.name}.`, "success");
     return;
   }
   await invoke(side === "local" ? "local_remove" : "remote_remove", {
