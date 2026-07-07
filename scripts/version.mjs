@@ -20,7 +20,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // name → [absolute path, regex whose group 2 is the version]
 const JSON_VERSION_RE = /("version"\s*:\s*")([^"]+)(")/;
 const CARGO_TOML_RE = /(\[package\][\s\S]*?\nversion\s*=\s*")([^"]+)(")/;
-const CARGO_LOCK_RE = /(name = "packetboat"\nversion = ")([^"]+)(")/;
+// \r?\n: the working copy may have CRLF endings on Windows (autocrlf rewrites
+// files on checkout), which a bare \n would silently fail to match.
+const CARGO_LOCK_RE = /(name = "packetboat"\r?\nversion = ")([^"]+)(")/;
 const FILES = {
   "package.json": [path.join(root, "package.json"), JSON_VERSION_RE],
   "tauri.conf.json": [path.join(root, "src-tauri", "tauri.conf.json"), JSON_VERSION_RE],
@@ -51,6 +53,7 @@ function bump(version, kind) {
 }
 
 function setVersion(version) {
+  const updated = [];
   for (const [name, [p, re]] of Object.entries(FILES)) {
     const text = read(p);
     if (!re.test(text)) {
@@ -62,7 +65,9 @@ function setVersion(version) {
       throw new Error(`couldn't find the version field in ${name}`);
     }
     fs.writeFileSync(p, text.replace(re, `$1${version}$3`));
+    updated.push(name);
   }
+  return updated;
 }
 
 function main() {
@@ -97,8 +102,10 @@ function main() {
     process.exit(1);
   }
 
-  setVersion(target);
-  console.log(`Version set to ${target} (package.json, tauri.conf.json, Cargo.toml, Cargo.lock).`);
+  // Name exactly what was updated, so a skipped file is visible in the
+  // summary and not just in a warning line above it.
+  const updated = setVersion(target);
+  console.log(`Version set to ${target} (${updated.join(", ")}).`);
   console.log(`Next: commit, then tag the release — git tag v${target}`);
 }
 
