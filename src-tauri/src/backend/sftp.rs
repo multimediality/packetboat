@@ -44,7 +44,12 @@ pub struct SftpBackend {
     // down the SSH connection that the SFTP channel rides on. Wrapped in a
     // Mutex so the backend is `Sync` regardless of the handle's own bounds.
     _ssh: Mutex<Handle<ClientHandler>>,
-    sftp: Mutex<SftpSession>,
+    // Deliberately NOT behind a mutex: SftpSession is built for concurrent
+    // use (every method takes &self; requests multiplex over the channel,
+    // matched by request id), so operations from different tasks — transfers,
+    // listings, batched mkdirs — pipeline instead of taking turns. A mutex
+    // here serialized every file open behind a full network round-trip.
+    sftp: SftpSession,
 }
 
 impl SftpBackend {
@@ -83,7 +88,7 @@ impl SftpBackend {
 
         Ok(Self {
             _ssh: Mutex::new(handle),
-            sftp: Mutex::new(sftp),
+            sftp,
         })
     }
 }
@@ -95,7 +100,7 @@ impl StorageBackend for SftpBackend {
     }
 
     async fn list(&self, path: &str) -> BackendResult<Vec<Entry>> {
-        let sftp = self.sftp.lock().await;
+        let sftp = &self.sftp;
         let dir = sftp.read_dir(path.to_string()).await?;
         let mut entries = Vec::new();
         for item in dir {
@@ -123,19 +128,18 @@ impl StorageBackend for SftpBackend {
     }
 
     async fn canonicalize(&self, path: &str) -> BackendResult<String> {
-        let sftp = self.sftp.lock().await;
+        let sftp = &self.sftp;
         Ok(sftp.canonicalize(path.to_string()).await?)
     }
 
     async fn open_read(&self, path: &str) -> BackendResult<Box<dyn AsyncRead + Send + Unpin>> {
-        // The returned File owns its own handle to the session, so it can
-        // outlive this lock guard and be streamed independently.
-        let sftp = self.sftp.lock().await;
-        Ok(Box::new(sftp.open(path.to_string()).await?))
+        // The returned File owns its own handle to the session and streams
+        // independently of other operations.
+        Ok(Box::new(self.sftp.open(path.to_string()).await?))
     }
 
     async fn open_write(&self, path: &str) -> BackendResult<Box<dyn AsyncWrite + Send + Unpin>> {
-        let sftp = self.sftp.lock().await;
+        let sftp = &self.sftp;
         Ok(Box::new(sftp.create(path.to_string()).await?))
     }
 
@@ -145,14 +149,14 @@ impl StorageBackend for SftpBackend {
         offset: u64,
     ) -> BackendResult<Box<dyn AsyncRead + Send + Unpin>> {
         // SFTP is random-access: open then seek to the resume offset.
-        let sftp = self.sftp.lock().await;
+        let sftp = &self.sftp;
         let mut file = sftp.open_with_flags(path.to_string(), OpenFlags::READ).await?;
         file.seek(std::io::SeekFrom::Start(offset)).await?;
         Ok(Box::new(file))
     }
 
     async fn open_append(&self, path: &str) -> BackendResult<Box<dyn AsyncWrite + Send + Unpin>> {
-        let sftp = self.sftp.lock().await;
+        let sftp = &self.sftp;
         let file = sftp
             .open_with_flags(path.to_string(), OpenFlags::WRITE | OpenFlags::APPEND)
             .await?;
@@ -160,7 +164,7 @@ impl StorageBackend for SftpBackend {
     }
 
     async fn read_file(&self, path: &str) -> BackendResult<Vec<u8>> {
-        let sftp = self.sftp.lock().await;
+        let sftp = &self.sftp;
         Ok(sftp.read(path.to_string()).await?)
     }
 
@@ -168,31 +172,23 @@ impl StorageBackend for SftpBackend {
         // Not sftp.write(): russh-sftp's helper opens with OpenFlags::WRITE
         // only (no CREATE), so writing a file that doesn't exist yet fails
         // with NoSuchFile. Open the way the streaming path does — create /
-        // truncate — and shut down explicitly to surface close errors. The
-        // lock covers only the open (like open_write), so concurrent calls
-        // overlap on the wire instead of serializing whole files.
-        let mut file = {
-            let sftp = self.sftp.lock().await;
-            sftp.create(path.to_string()).await?
-        };
+        // truncate — and shut down explicitly to surface close errors.
+        let mut file = self.sftp.create(path.to_string()).await?;
         file.write_all(data).await?;
         file.shutdown().await?;
         Ok(())
     }
 
     async fn mkdir(&self, path: &str) -> BackendResult<()> {
-        let sftp = self.sftp.lock().await;
+        let sftp = &self.sftp;
         sftp.create_dir(path.to_string()).await?;
         Ok(())
     }
 
     async fn mkdir_many(&self, paths: &[String]) -> Vec<bool> {
-        // One lock for the whole batch: SftpSession multiplexes concurrent
-        // requests over the channel (matched by request id), so firing them
-        // together pipelines the round-trips instead of paying one per
-        // directory.
-        let sftp = self.sftp.lock().await;
-        let futs = paths.iter().map(|p| sftp.create_dir(p.to_string()));
+        // Fired together, the batch pipelines its round-trips instead of
+        // paying one per directory.
+        let futs = paths.iter().map(|p| self.sftp.create_dir(p.to_string()));
         futures_util::future::join_all(futs)
             .await
             .into_iter()
@@ -201,7 +197,7 @@ impl StorageBackend for SftpBackend {
     }
 
     async fn remove(&self, path: &str, is_dir: bool) -> BackendResult<()> {
-        let sftp = self.sftp.lock().await;
+        let sftp = &self.sftp;
         if is_dir {
             sftp.remove_dir(path.to_string()).await?;
         } else {
@@ -211,7 +207,7 @@ impl StorageBackend for SftpBackend {
     }
 
     async fn rename(&self, from: &str, to: &str) -> BackendResult<()> {
-        let sftp = self.sftp.lock().await;
+        let sftp = &self.sftp;
         sftp.rename(from.to_string(), to.to_string()).await?;
         Ok(())
     }

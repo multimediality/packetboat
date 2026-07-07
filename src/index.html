@@ -396,6 +396,10 @@
                 <span>Maximum simultaneous transfers</span>
                 <input type="number" id="set-max-transfers" min="1" max="10" />
               </label>
+              <label class="field grow">
+                <span>Maximum SFTP transfers</span>
+                <input type="number" id="set-max-transfers-sftp" min="1" max="10" />
+              </label>
             </div>
             <div class="field-row">
               <label class="field grow">
@@ -408,9 +412,11 @@
               </label>
             </div>
             <p class="hint">
-              How many transfers run at once (0 = no per-direction limit). Raising this
-              opens extra connections to the same server, so keep it modest on shared
-              hosts that limit simultaneous connections.
+              How many transfers run at once (0 = no per-direction limit). SFTP has its
+              own limit: it multiplexes one connection, so higher values are safe. The
+              general limit covers FTP and cloud, where each transfer opens another
+              connection — keep it modest on shared hosts that cap simultaneous
+              connections.
             </p>
             <label class="field">
               <span>When a download's target file exists</span>

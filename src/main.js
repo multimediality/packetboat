@@ -56,6 +56,7 @@ function cacheEls() {
   el.setCloseToTray = document.getElementById("set-close-to-tray");
   el.setNotifications = document.getElementById("set-notifications");
   el.setMaxTransfers = document.getElementById("set-max-transfers");
+  el.setMaxTransfersSftp = document.getElementById("set-max-transfers-sftp");
   el.setMaxDownloads = document.getElementById("set-max-downloads");
   el.setMaxUploads = document.getElementById("set-max-uploads");
   el.setReplaceInvalid = document.getElementById("set-replace-invalid");
@@ -946,15 +947,18 @@ async function restoreTabPanes(tab) {
   }
 }
 
-function addTab(id, label, cloud = false) {
+function addTab(id, label, cloud = false, proto = "") {
   // `cloud` marks object-store backends (S3/B2/WebDAV) which can't resume
   // uploads (no append) — used to hide that option in the conflict prompt.
-  // `localPath` seeds from the current local folder; the connect flow overrides
-  // it if the site has a default local dir.
+  // `proto` is the connect protocol ("sftp" / "ftp" / a cloud service) — SFTP
+  // tabs get the wider drop-upload concurrency. `localPath` seeds from the
+  // current local folder; the connect flow overrides it if the site has a
+  // default local dir.
   tabs.push({
     id,
     label,
     cloud,
+    proto,
     remote: { path: null, connected: true },
     tree: freshTree(),
     localPath: state.local.path,
@@ -1137,7 +1141,7 @@ async function doConnectWith({
         if (result.certPrompt) throw new Error("certificate still not trusted");
       }
     }
-    addTab(result.id, label || (cloud ? target : `${username || "anonymous"}@${host}`), cloud);
+    addTab(result.id, label || (cloud ? target : `${username || "anonymous"}@${host}`), cloud, protocol);
     log(`Connected to ${target}`, "success");
     await loadTreeRoots("remote");
     await navigateRemote(await resolveStartDir(result.id, remoteDir, result.home));
@@ -2942,14 +2946,23 @@ async function importExternalFiles(items, destSide, destDir) {
   }
   const direction = destSide === "remote" ? "upload" : "download";
   const batch = items.length > 1 ? {} : null;
-  // Cap concurrent uploads at the engine's transfer limit. The limiter also
-  // bounds memory: a file's bytes are only read once it holds a slot.
-  const maxParallel = Math.min(10, Math.max(1, Number(settings.maxTransfers) || 2));
+  // Cap concurrent uploads: SFTP gets its own (wider) limit since it
+  // multiplexes one session; FTP/cloud use the general cap. The limit is read
+  // live — and parked workers are re-woken via externalImportPoke — so a
+  // mid-run settings change takes effect immediately. The limiter also bounds
+  // memory: a file's bytes are only read once it holds a slot.
+  const limitNow = () => {
+    const sftp = destSide === "remote" && activeTab()?.proto === "sftp";
+    return sftp
+      ? clampInt(settings.maxTransfersSftp, 1, 10, 4)
+      : clampInt(settings.maxTransfers, 1, 10, 2);
+  };
   let inFlight = 0;
   const slotWaiters = [];
   const uploads = [];
+  externalImportPoke = () => slotWaiters.splice(0).forEach((w) => w());
   const runLimited = async (fn) => {
-    while (inFlight >= maxParallel) await new Promise((res) => slotWaiters.push(res));
+    while (inFlight >= limitNow()) await new Promise((res) => slotWaiters.push(res));
     inFlight++;
     try {
       return await fn();
@@ -3085,6 +3098,9 @@ async function walkDroppedEntries(entries, rel, out) {
 let externalImportActive = false;
 // Set by the Stop toolbar button; the import loops check it between steps.
 let externalImportAbort = false;
+// Wakes a running import's parked upload workers after a limits change, so a
+// raised concurrency setting applies mid-run. Set while an import is active.
+let externalImportPoke = null;
 // Local ids for OS-drop queue rows (they don't ride the transfer engine).
 let extRowCounter = 0;
 // walkIds of in-flight folder scans (transferFolder), so Stop can cancel_tree
@@ -3124,6 +3140,7 @@ async function runExternalImport(task) {
   } finally {
     externalImportActive = false;
     externalImportAbort = false;
+    externalImportPoke = null;
     updateStopButton();
     // One summary notification per drop (per-file drain events are suppressed
     // while the import runs). If engine transfers are still active, skip —
@@ -3831,9 +3848,12 @@ const settings = {
   // Desktop notification when the transfer queue finishes while the app is in
   // the background.
   notifications: true,
-  // Concurrent transfers: overall cap (1-10) plus per-direction caps (0 = no
-  // limit).
+  // Concurrent transfers: the general cap (1-10) covers FTP/cloud, where each
+  // transfer is another real connection; SFTP has its own cap (multiplexed
+  // over one session, so it defaults higher); per-direction caps (0 = no
+  // limit) apply across both.
   maxTransfers: 2,
+  maxTransfersSftp: 4,
   maxDownloads: 0,
   maxUploads: 0,
   // Replace characters the local OS forbids in filenames when downloading, and
@@ -3869,7 +3889,11 @@ function applyTransferLimits() {
     max: clampInt(settings.maxTransfers, 1, 10, 2),
     downloads: clampInt(settings.maxDownloads, 0, 10, 0),
     uploads: clampInt(settings.maxUploads, 0, 10, 0),
+    sftp: clampInt(settings.maxTransfersSftp, 1, 10, 4),
   }).catch(() => {});
+  // A running OS-drop import reads the limits live — wake any workers parked
+  // on the old value so a mid-run raise takes effect immediately.
+  if (externalImportPoke) externalImportPoke();
 }
 
 function clampInt(v, min, max, fallback) {
@@ -3920,6 +3944,7 @@ function openSettings() {
   el.setCloseToTray.checked = settings.closeToTray;
   el.setNotifications.checked = settings.notifications;
   el.setMaxTransfers.value = settings.maxTransfers;
+  el.setMaxTransfersSftp.value = settings.maxTransfersSftp;
   el.setMaxDownloads.value = settings.maxDownloads;
   el.setMaxUploads.value = settings.maxUploads;
   el.setReplaceInvalid.checked = settings.replaceInvalidChars;
@@ -4141,11 +4166,12 @@ function wireEvents() {
   });
   for (const [input, key] of [
     [el.setMaxTransfers, "maxTransfers"],
+    [el.setMaxTransfersSftp, "maxTransfersSftp"],
     [el.setMaxDownloads, "maxDownloads"],
     [el.setMaxUploads, "maxUploads"],
   ]) {
     input.addEventListener("change", () => {
-      settings[key] = clampInt(input.value, key === "maxTransfers" ? 1 : 0, 10, settings[key]);
+      settings[key] = clampInt(input.value, key.startsWith("maxTransfers") ? 1 : 0, 10, settings[key]);
       input.value = settings[key];
       saveSettings();
       applyTransferLimits();

@@ -462,11 +462,13 @@ fn cancel_transfer(state: State<'_, AppState>, id: u64) {
     state.transfers.cancel(id);
 }
 
-/// Set the transfer concurrency limits: overall max simultaneous transfers, plus
-/// per-direction caps (0 = unlimited). Applied to newly-started transfers.
+/// Set the transfer concurrency limits: max simultaneous non-SFTP transfers,
+/// per-direction caps (0 = unlimited), and the SFTP pool size (SFTP multiplexes
+/// one session, so it runs on its own — usually wider — limit). Applied to
+/// newly-started transfers.
 #[tauri::command]
-fn set_transfer_limits(state: State<'_, AppState>, max: usize, downloads: usize, uploads: usize) {
-    state.transfers.set_limits(max, downloads, uploads);
+fn set_transfer_limits(state: State<'_, AppState>, max: usize, downloads: usize, uploads: usize, sftp: usize) {
+    state.transfers.set_limits(max, downloads, uploads, sftp);
 }
 
 /// Metadata for [`put_bytes`], carried in a base64-encoded JSON `x-pb-meta`

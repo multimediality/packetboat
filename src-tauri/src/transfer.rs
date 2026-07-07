@@ -14,7 +14,7 @@ use tauri::{async_runtime, AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex, Notify};
 
-use crate::backend::{local::LocalBackend, BackendError, BackendResult, StorageBackend};
+use crate::backend::{local::LocalBackend, BackendError, BackendKind, BackendResult, StorageBackend};
 
 /// All live remote connections, keyed by id, shared between the command layer
 /// and the transfer worker so a queued transfer targets the right session.
@@ -125,12 +125,18 @@ enum Update {
 }
 
 /// Runtime concurrency limits (settable from the frontend). A dispatcher pulls
-/// queued jobs and runs up to `max` at once, respecting the per-direction caps.
+/// queued jobs and runs them concurrently, respecting the caps. SFTP jobs get
+/// their own pool (`max_sftp`): they multiplex over one session, so running
+/// wide costs nothing extra — unlike FTP, where every concurrent transfer is
+/// another real connection (shared hosts cap those, hence the modest `max`).
+/// The per-direction caps apply across both pools.
 struct Limits {
-    max: AtomicUsize,    // overall simultaneous transfers (>= 1)
-    max_dl: AtomicUsize, // per-direction cap; 0 = unlimited
+    max: AtomicUsize,      // simultaneous non-SFTP transfers (>= 1)
+    max_sftp: AtomicUsize, // simultaneous SFTP transfers (>= 1)
+    max_dl: AtomicUsize,   // per-direction cap; 0 = unlimited
     max_ul: AtomicUsize,
     active: AtomicUsize,
+    active_sftp: AtomicUsize,
     active_dl: AtomicUsize,
     active_ul: AtomicUsize,
     slot_freed: Notify, // wakes the dispatcher when a slot frees or a limit rises
@@ -140,20 +146,31 @@ impl Limits {
     fn new() -> Self {
         Self {
             max: AtomicUsize::new(2), // FileZilla's default
+            max_sftp: AtomicUsize::new(4),
             max_dl: AtomicUsize::new(0),
             max_ul: AtomicUsize::new(0),
             active: AtomicUsize::new(0),
+            active_sftp: AtomicUsize::new(0),
             active_dl: AtomicUsize::new(0),
             active_ul: AtomicUsize::new(0),
             slot_freed: Notify::new(),
         }
     }
 
-    fn set(&self, max: usize, dl: usize, ul: usize) {
+    fn set(&self, max: usize, dl: usize, ul: usize, sftp: usize) {
         self.max.store(max.max(1), Ordering::Relaxed);
+        self.max_sftp.store(sftp.max(1), Ordering::Relaxed);
         self.max_dl.store(dl, Ordering::Relaxed);
         self.max_ul.store(ul, Ordering::Relaxed);
         self.slot_freed.notify_one(); // a raised limit may open slots
+    }
+
+    fn pool(&self, is_sftp: bool) -> (&AtomicUsize, &AtomicUsize) {
+        if is_sftp {
+            (&self.active_sftp, &self.max_sftp)
+        } else {
+            (&self.active, &self.max)
+        }
     }
 
     fn dir_counters(&self, dir: Direction) -> (&AtomicUsize, &AtomicUsize) {
@@ -163,8 +180,9 @@ impl Limits {
         }
     }
 
-    fn has_slot(&self, dir: Direction) -> bool {
-        if self.active.load(Ordering::Relaxed) >= self.max.load(Ordering::Relaxed) {
+    fn has_slot(&self, dir: Direction, is_sftp: bool) -> bool {
+        let (active, max) = self.pool(is_sftp);
+        if active.load(Ordering::Relaxed) >= max.load(Ordering::Relaxed) {
             return false;
         }
         let (active, max) = self.dir_counters(dir);
@@ -172,13 +190,13 @@ impl Limits {
         m == 0 || active.load(Ordering::Relaxed) < m
     }
 
-    fn acquire(&self, dir: Direction) {
-        self.active.fetch_add(1, Ordering::Relaxed);
+    fn acquire(&self, dir: Direction, is_sftp: bool) {
+        self.pool(is_sftp).0.fetch_add(1, Ordering::Relaxed);
         self.dir_counters(dir).0.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn release(&self, dir: Direction) {
-        self.active.fetch_sub(1, Ordering::Relaxed);
+    fn release(&self, dir: Direction, is_sftp: bool) {
+        self.pool(is_sftp).0.fetch_sub(1, Ordering::Relaxed);
         self.dir_counters(dir).0.fetch_sub(1, Ordering::Relaxed);
         self.slot_freed.notify_one();
     }
@@ -207,19 +225,30 @@ impl TransferManager {
         async_runtime::spawn(async move {
             while let Some((id, req)) = rx.recv().await {
                 let dir = req.direction;
+                // SFTP jobs gate on their own pool — see Limits. Kind is
+                // looked up when the job reaches the head of the queue; a
+                // vanished connection just gates as non-SFTP (and fails
+                // NotConnected downstream).
+                let is_sftp = {
+                    let guard = connections.lock().await;
+                    guard
+                        .get(&req.connection_id)
+                        .map(|b| matches!(b.kind(), BackendKind::Sftp))
+                        .unwrap_or(false)
+                };
                 // Wait for a free slot for this transfer's direction, then run it
                 // concurrently so other transfers keep flowing.
-                while !d_limits.has_slot(dir) {
+                while !d_limits.has_slot(dir, is_sftp) {
                     d_limits.slot_freed.notified().await;
                 }
-                d_limits.acquire(dir);
+                d_limits.acquire(dir, is_sftp);
                 let app = d_app.clone();
                 let cancel = d_cancel.clone();
                 let limits = d_limits.clone();
                 let conns = connections.clone();
                 tokio::spawn(async move {
                     run_one(&app, &conns, id, req, &cancel).await;
-                    limits.release(dir);
+                    limits.release(dir, is_sftp);
                 });
             }
         });
@@ -232,9 +261,10 @@ impl TransferManager {
         }
     }
 
-    /// Apply new concurrency limits (overall max, per-direction caps; 0 = none).
-    pub fn set_limits(&self, max: usize, downloads: usize, uploads: usize) {
-        self.limits.set(max, downloads, uploads);
+    /// Apply new concurrency limits: non-SFTP max, per-direction caps
+    /// (0 = none), and the SFTP pool size.
+    pub fn set_limits(&self, max: usize, downloads: usize, uploads: usize, sftp: usize) {
+        self.limits.set(max, downloads, uploads, sftp);
     }
 
     /// Add a transfer to the queue and return its id.
