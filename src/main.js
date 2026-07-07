@@ -2828,6 +2828,8 @@ async function transferFolder(entry, sourceSide, destSide, destDir, batch = null
   // buffer in order while this loop awaits (mkdirs, conflict prompts); the walk
   // signals completion with a final done/error message on the same channel.
   const walkId = ++treeWalkId;
+  activeWalks.add(walkId);
+  updateStopButton();
   const messages = [];
   let wake = null;
   const chan = new TauriChannel();
@@ -2883,6 +2885,8 @@ async function transferFolder(entry, sourceSide, destSide, destDir, batch = null
       if (!r.proceed) {
         if (r.abort) {
           invoke("cancel_tree", { walkId }).catch(() => {});
+          activeWalks.delete(walkId);
+          updateStopButton();
           log(`Cancelled ${entry.name} — ${count} file${count === 1 ? "" : "s"} already queued.`);
           return;
         }
@@ -2894,6 +2898,8 @@ async function transferFolder(entry, sourceSide, destSide, destDir, batch = null
       count++;
     }
   }
+  activeWalks.delete(walkId);
+  updateStopButton();
   const skipNote = skipped ? ` (${skipped} skipped)` : "";
   if (count === 0 && skipped === 0) log(`${entry.name} has no files to transfer.`);
   else log(`Queued ${count} file${count === 1 ? "" : "s"} from ${entry.name}${skipNote}.`, "success");
@@ -2936,7 +2942,28 @@ async function importExternalFiles(items, destSide, destDir) {
   }
   const direction = destSide === "remote" ? "upload" : "download";
   const batch = items.length > 1 ? {} : null;
+  // Cap concurrent uploads at the engine's transfer limit. The limiter also
+  // bounds memory: a file's bytes are only read once it holds a slot.
+  const maxParallel = Math.min(10, Math.max(1, Number(settings.maxTransfers) || 2));
+  let inFlight = 0;
+  const slotWaiters = [];
+  const uploads = [];
+  const runLimited = async (fn) => {
+    while (inFlight >= maxParallel) await new Promise((res) => slotWaiters.push(res));
+    inFlight++;
+    try {
+      return await fn();
+    } finally {
+      inFlight--;
+      const w = slotWaiters.shift();
+      if (w) w();
+    }
+  };
   for (const { file, dir } of items) {
+    if (externalImportAbort) {
+      log("Import stopped.");
+      break;
+    }
     if (file.size > MAX_DRAG_IMPORT_BYTES) {
       log(`${file.name} is too large to drag-import (${formatSize(MAX_DRAG_IMPORT_BYTES)} limit).`, "error");
       continue;
@@ -2953,20 +2980,56 @@ async function importExternalFiles(items, destSide, destDir) {
       log(`Skipped ${file.name} — target already exists.`);
       continue;
     }
-    try {
-      log(`${destSide === "remote" ? "Uploading" : "Importing"} ${file.name}…`);
-      // Send the bytes as a raw IPC body (not a JSON number-array, which peaks
-      // at several times the file size in memory); routing metadata rides in a
-      // base64-encoded header.
-      const buf = await file.arrayBuffer();
-      const meta = encodeMeta({ id: activeTabId ?? 0, side: destSide, dir, name: r.name });
-      await invoke("put_bytes", buf, { headers: { "x-pb-meta": meta } });
-      log(`Transfer complete: ${file.name}`, "success");
-    } catch (e) {
-      log(`Transfer failed: ${file.name} — ${e}`, "error");
+    // Conflict checks stay sequential (prompts can't overlap), but the actual
+    // uploads run a few at a time through the limiter below.
+    uploads.push(runLimited(() => uploadDroppedFile(file, dir, r.name, direction, destSide)));
+  }
+  await Promise.all(uploads);
+  refresh(destSide);
+}
+
+// One OS-dropped file: read its bytes, send them via put_bytes, and drive its
+// hand-managed queue row (active → Done/Failed; no byte progress — put_bytes
+// is a single call). OS drops don't ride the transfer engine, so the row is
+// ours to update.
+async function uploadDroppedFile(file, dir, name, direction, destSide) {
+  if (externalImportAbort) return; // stopped while waiting for an upload slot
+  const rowIt = addQueueRow({ id: `ext-${++extRowCounter}`, direction, name: file.name, size: file.size });
+  if (rowIt) {
+    rowIt.cancelBtn.hidden = true; // no per-file cancel — the toolbar Stop covers drops
+    rowIt.stat.textContent = destSide === "remote" ? "Uploading…" : "Importing…";
+  }
+  try {
+    log(`${destSide === "remote" ? "Uploading" : "Importing"} ${file.name}…`);
+    // Send the bytes as a raw IPC body (not a JSON number-array, which peaks
+    // at several times the file size in memory); routing metadata rides in a
+    // base64-encoded header.
+    const buf = await file.arrayBuffer();
+    const meta = encodeMeta({ id: activeTabId ?? 0, side: destSide, dir, name });
+    await invoke("put_bytes", buf, { headers: { "x-pb-meta": meta } });
+    if (rowIt) {
+      rowIt.fill.style.width = "100%";
+      rowIt.stat.textContent = "Done";
+      queueRun.success++;
+      setRowStatus(rowIt, "success");
+    }
+    log(`Transfer complete: ${file.name}`, "success");
+  } catch (e) {
+    if (rowIt) {
+      rowIt.stat.textContent = "Failed";
+      rowIt.row.title = String(e);
+      queueRun.failed++;
+      setRowStatus(rowIt, "failed");
+      rowIt.retryBtn.hidden = true; // retry re-enqueues engine transfers; drops have none
+    }
+    log(`Transfer failed: ${file.name} — ${e}`, "error");
+    // A gone connection can't recover mid-import — every remaining file would
+    // fail the same way, so stop the whole import instead of failing each.
+    if (String(e).includes("not connected")) {
+      if (!externalImportAbort) log("Import stopped — no longer connected.", "error");
+      externalImportAbort = true;
     }
   }
-  refresh(destSide);
 }
 
 // Flatten a dropped FileSystemEntry tree (webkitGetAsEntry) into `out.dirs`
@@ -2980,6 +3043,7 @@ async function importExternalFiles(items, destSide, destDir) {
 async function walkDroppedEntries(entries, rel, out) {
   const tasks = [];
   for (const entry of entries) {
+    if (externalImportAbort) break;
     if (entry.isDirectory) {
       // Pushed before the child walk starts, so a parent always precedes its
       // children in out.dirs even though branches interleave.
@@ -3019,12 +3083,39 @@ async function walkDroppedEntries(entries, rel, out) {
 // while, and a second drop meanwhile would start an overlapping import that
 // fights the first with conflict prompts.
 let externalImportActive = false;
+// Set by the Stop toolbar button; the import loops check it between steps.
+let externalImportAbort = false;
+// Local ids for OS-drop queue rows (they don't ride the transfer engine).
+let extRowCounter = 0;
+// walkIds of in-flight folder scans (transferFolder), so Stop can cancel_tree
+// them. list_tree always sends its final Done/Error on the channel — even when
+// cancelled — so the consuming loop ends cleanly.
+const activeWalks = new Set();
+
+// The Stop button is live whenever anything is moving: an OS-drop import, a
+// folder scan, or active queue transfers (prevActiveCount tracks the latter).
+function updateStopButton() {
+  const btn = document.getElementById("tool-stop");
+  if (btn) btn.disabled = !(externalImportActive || activeWalks.size > 0 || prevActiveCount > 0);
+}
+
+function stopAllActivity() {
+  log("Stopping transfers…");
+  if (externalImportActive) externalImportAbort = true;
+  for (const id of activeWalks) invoke("cancel_tree", { walkId: id }).catch(() => {});
+  for (const [id, it] of queue) {
+    if (it.row.dataset.status === "active") cancelTransfer(id);
+  }
+}
+
 async function runExternalImport(task) {
   if (externalImportActive) {
     log("Still importing the previous drop — this one was ignored.", "error");
     return;
   }
   externalImportActive = true;
+  externalImportAbort = false;
+  updateStopButton();
   // One conflict-listing cache per drop (importExternalFiles no longer clears
   // it itself — importExternalEntries seeds it with known-empty created dirs).
   conflictCache.clear();
@@ -3032,6 +3123,12 @@ async function runExternalImport(task) {
     await task();
   } finally {
     externalImportActive = false;
+    externalImportAbort = false;
+    updateStopButton();
+    // One summary notification per drop (per-file drain events are suppressed
+    // while the import runs). If engine transfers are still active, skip —
+    // their eventual drain reports the combined tally.
+    if (prevActiveCount === 0) notifyQueueDrained();
   }
 }
 
@@ -3048,6 +3145,10 @@ async function importExternalEntries(entries, destSide, destDir) {
   log(`Scanning ${entries.filter((e) => e.isDirectory).map((e) => e.name).join(", ")}…`);
   const out = { dirs: [], files: [] };
   await walkDroppedEntries(entries, "", out);
+  if (externalImportAbort) {
+    log("Import stopped.");
+    return;
+  }
   if (out.files.length > 0) {
     const nf = out.files.length;
     const nd = out.dirs.length;
@@ -3065,6 +3166,11 @@ async function importExternalEntries(entries, destSide, destDir) {
   }
   for (const level of levels) {
     if (!level) continue;
+    if (externalImportAbort) {
+      log("Import stopped.");
+      refresh(destSide);
+      return;
+    }
     const dirs = level.map((d) => [joinPath(destDir, relParent(d)), relName(d)]);
     try {
       const created = await invoke("mkdir_many", { id: activeTabId ?? 0, side: destSide, dirs });
@@ -3348,8 +3454,12 @@ function updateQueueCounts() {
   document.getElementById("count-success").textContent = success;
   // The queue just drained (last active transfer reached a terminal state) —
   // notify with this run's tally.
-  if (prevActiveCount > 0 && active === 0) notifyQueueDrained();
+  // During an OS-drop import the active count can touch zero between files —
+  // suppress the drain notification there; runExternalImport sends one summary
+  // when the whole drop finishes instead.
+  if (prevActiveCount > 0 && active === 0 && !externalImportActive) notifyQueueDrained();
   prevActiveCount = active;
+  updateStopButton();
 }
 
 // Desktop notification when the queue finishes, but only while Packetboat is in
@@ -3979,6 +4089,7 @@ function wireEvents() {
     refresh("local");
     refresh("remote");
   });
+  document.getElementById("tool-stop").addEventListener("click", stopAllActivity);
   document.getElementById("tool-log").addEventListener("click", () => {
     settings.showLog = !settings.showLog;
     saveSettings();

@@ -10,7 +10,7 @@ use russh::keys::{HashAlg, PrivateKeyWithHashAlg};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncSeekExt, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 use super::{BackendError, BackendKind, BackendResult, Entry, EntryKind, StorageBackend};
@@ -165,8 +165,18 @@ impl StorageBackend for SftpBackend {
     }
 
     async fn write_file(&self, path: &str, data: &[u8]) -> BackendResult<()> {
-        let sftp = self.sftp.lock().await;
-        sftp.write(path.to_string(), data).await?;
+        // Not sftp.write(): russh-sftp's helper opens with OpenFlags::WRITE
+        // only (no CREATE), so writing a file that doesn't exist yet fails
+        // with NoSuchFile. Open the way the streaming path does — create /
+        // truncate — and shut down explicitly to surface close errors. The
+        // lock covers only the open (like open_write), so concurrent calls
+        // overlap on the wire instead of serializing whole files.
+        let mut file = {
+            let sftp = self.sftp.lock().await;
+            sftp.create(path.to_string()).await?
+        };
+        file.write_all(data).await?;
+        file.shutdown().await?;
         Ok(())
     }
 

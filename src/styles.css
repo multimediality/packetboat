@@ -265,8 +265,8 @@ body {
   border: 1px solid transparent;
   background: transparent;
   color: var(--muted);
-  width: 30px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   display: inline-flex;
@@ -285,9 +285,14 @@ body {
   background: var(--surface-3);
 }
 
+.tool-btn:disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
 .tool-btn svg {
-  width: 17px;
-  height: 17px;
+  width: 22px;
+  height: 22px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -300,6 +305,10 @@ body {
   height: 18px;
   background: var(--border);
   margin: 0 4px;
+}
+
+#tool-stop {
+  padding: 0;
 }
 
 .conn {
