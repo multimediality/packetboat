@@ -1408,6 +1408,36 @@ function onSiteClick(index, ev) {
     siteAnchorIndex = index;
   }
   applySiteSelection();
+  // Keep focus on the list so Up/Down keep working after a click.
+  el.sitesList.focus({ preventScroll: true });
+}
+
+// Keyboard navigation for the site list: Up/Down move the single selection
+// (Home/End jump to the ends) and scroll it into view, so a list taller than
+// the panel follows the selection instead of leaving it clipped off-screen.
+function onSiteListKey(ev) {
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(ev.key)) return;
+  if (sites.length === 0) return;
+  ev.preventDefault();
+  const cur =
+    selectedSiteIds.length === 1
+      ? sites.findIndex((s) => s.id === selectedSiteIds[0])
+      : siteAnchorIndex;
+  let next;
+  if (ev.key === "Home") next = 0;
+  else if (ev.key === "End") next = sites.length - 1;
+  else if (cur < 0) next = ev.key === "ArrowDown" ? 0 : sites.length - 1;
+  else next = ev.key === "ArrowDown" ? cur + 1 : cur - 1;
+  next = Math.max(0, Math.min(sites.length - 1, next));
+  selectedSiteIds = [sites[next].id];
+  siteAnchorIndex = next;
+  applySiteSelection(); // re-renders the list synchronously, then we scroll to it
+  scrollSelectedSiteIntoView();
+}
+
+function scrollSelectedSiteIntoView() {
+  const sel = el.sitesList.querySelector(".site-item.selected");
+  if (sel) sel.scrollIntoView({ block: "nearest" });
 }
 
 // Reflect the current selection: a single selection fills + enables the form;
@@ -1484,7 +1514,9 @@ async function selectSite(id) {
     for (const key of cloudSecretKeys(site.protocol)) {
       try {
         const val = await invoke("secret_get", { id: `${site.id}:${key}` });
-        if (val) {
+        // The selection can move on (fast arrow-key nav) while this awaits;
+        // bail so a stale secret doesn't overwrite the now-current site's field.
+        if (val && selectedSiteId === id) {
           const input = el.cloudFields.querySelector(`input[data-key="${key}"]`);
           if (input) input.value = val;
         }
@@ -1496,7 +1528,7 @@ async function selectSite(id) {
     // Pre-fill the saved password if one is stored in the keychain.
     try {
       const pw = await invoke("secret_get", { id });
-      if (pw) el.sitePass.value = pw;
+      if (pw && selectedSiteId === id) el.sitePass.value = pw;
     } catch (_) {
       /* ignore */
     }
@@ -1504,7 +1536,7 @@ async function selectSite(id) {
     // Pre-fill the saved key passphrase from the keychain.
     try {
       const pp = await invoke("secret_get", { id: `${id}:keypass` });
-      if (pp) el.siteKeyPass.value = pp;
+      if (pp && selectedSiteId === id) el.siteKeyPass.value = pp;
     } catch (_) {
       /* ignore */
     }
@@ -3582,13 +3614,24 @@ function showMenu(x, y, items) {
     });
     menu.appendChild(item);
   }
-  menu.style.left = `${x}px`;
-  menu.style.top = `${y}px`;
   document.body.appendChild(menu);
-  // Keep the menu on screen.
+  // Keep the menu on screen: clamp horizontally, and if it's taller than the
+  // room below the anchor, open upward — or, when it's taller than the viewport
+  // itself (a long saved-site list), pin it to the top and cap its height so it
+  // scrolls (via .ctx-menu overflow-y) instead of being cut off.
+  const margin = 6;
   const r = menu.getBoundingClientRect();
-  if (r.right > window.innerWidth) menu.style.left = `${Math.max(4, x - r.width)}px`;
-  if (r.bottom > window.innerHeight) menu.style.top = `${Math.max(4, y - r.height)}px`;
+  let left = x;
+  if (left + r.width > window.innerWidth - margin) {
+    left = Math.max(margin, window.innerWidth - r.width - margin);
+  }
+  let top = y;
+  if (top + r.height > window.innerHeight - margin) {
+    top = y - r.height >= margin ? y - r.height : margin;
+  }
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.style.maxHeight = `${window.innerHeight - margin - top}px`;
   activeMenu = menu;
 }
 

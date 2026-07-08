@@ -1309,15 +1309,19 @@ input[type="number"]::-webkit-inner-spin-button {
   gap: 3px;
   padding: 7px 14px;
   font-size: 13px;
+  min-width: 0;
 }
 
-/* Line 1: direction, name, size, progress, status, actions. The status column
-   fits "100% · 1023 MB · 99.9 MB/s" in Space Mono without wrapping. */
+/* Line 1: direction, name, size, progress, status, actions. At comfortable
+   widths the status column holds "100% · 1023 MB · 99.9 MB/s" on one line;
+   every middle track is minmax(0,…) so a narrow window shrinks the row (name
+   ellipsizes first) instead of forcing a horizontal scrollbar on the queue. */
 .q-head {
   display: grid;
-  grid-template-columns: 16px 1fr 80px 120px 200px 52px;
+  grid-template-columns: 16px minmax(0, 1fr) minmax(0, 80px) minmax(0, 120px) minmax(0, 200px) 52px;
   align-items: center;
   gap: 10px;
+  min-width: 0;
 }
 
 /* Line 2 (FileZilla-style): server · local path → remote path. */
@@ -1371,6 +1375,7 @@ input[type="number"]::-webkit-inner-spin-button {
 .q-size {
   text-align: right;
   font-size: 12px;
+  overflow: hidden;
   color: var(--faint);
   font-variant-numeric: tabular-nums;
 }
@@ -1439,6 +1444,7 @@ input[type="number"]::-webkit-inner-spin-button {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  overflow: hidden;
 }
 
 .q-row[data-status="success"] .q-fill {
@@ -1492,6 +1498,9 @@ input[type="number"]::-webkit-inner-spin-button {
   border: 1px solid var(--border-strong);
   border-radius: 8px;
   box-shadow: var(--pb-shadow);
+  /* A long list (e.g. many saved sites) scrolls instead of running off-screen;
+     showMenu() caps max-height to the space available in the viewport. */
+  overflow-y: auto;
 }
 
 .ctx-item {
