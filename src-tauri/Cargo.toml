@@ -1,6 +1,6 @@
 [package]
 name = "packetboat"
-version = "1.2.1"
+version = "1.2.2"
 description = "A modern, cross-platform file transfer client (FTP-first, cloud-capable)."
 authors = ["Packetboat contributors"]
 license = "GPL-3.0-or-later"

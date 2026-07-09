@@ -66,6 +66,14 @@ body {
   height: 100vh;
   display: grid;
   grid-template-rows: auto auto auto auto 1fr auto auto;
+  /* Pin the single column to the window width. Without this the implicit `auto`
+     column grows to the widest row's content (e.g. a queue row with long file
+     paths, or the quick-connect inputs), overflowing the app box — and since
+     body is overflow:hidden that shows as the UI clipping off the right edge
+     with no scrollbar. minmax(0,…) lets each row shrink and ellipsize instead;
+     overflow:hidden contains any content that still can't shrink. */
+  grid-template-columns: minmax(0, 1fr);
+  overflow: hidden;
 }
 
 /* Pin each region to its row. Otherwise, toggling the log panel and/or queue
@@ -1499,8 +1507,11 @@ input[type="number"]::-webkit-inner-spin-button {
   border-radius: 8px;
   box-shadow: var(--pb-shadow);
   /* A long list (e.g. many saved sites) scrolls instead of running off-screen;
-     showMenu() caps max-height to the space available in the viewport. */
+     showMenu() caps max-height to the space available in the viewport.
+     overscroll-behavior keeps a boundary overscroll from chaining to the page
+     (which would fire the document scroll handler that dismisses the menu). */
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .ctx-item {

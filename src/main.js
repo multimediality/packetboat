@@ -4345,7 +4345,21 @@ function wireEvents() {
     });
   }
   document.addEventListener("click", closeMenu);
-  document.addEventListener("scroll", closeMenu, true);
+  // Close the menu when the page/panes scroll (so it doesn't float away from its
+  // anchor) — but NOT when the scroll happens inside the menu itself, which is
+  // scrollable for long lists (this capture-phase listener sees that too).
+  document.addEventListener(
+    "scroll",
+    (e) => {
+      if (activeMenu && e.target instanceof Node && activeMenu.contains(e.target)) return;
+      closeMenu();
+    },
+    true,
+  );
+  // Resizing the window moves the anchor the menu was positioned against, so a
+  // still-open menu would sit in the wrong place (and can clip off-screen) —
+  // close it, matching the scroll behavior.
+  window.addEventListener("resize", closeMenu);
 
   // Suppress the WebView's built-in right-click menu (Back / Refresh / Save as /
   // Print / Inspect) outside the panes. Block by default so production never
