@@ -13,6 +13,7 @@ import {
   relativeUnder,
   joinUnder,
   normalizeOpRef,
+  entryComparator,
 } from "./util.js";
 
 // Guard the Tauri API so the shell still renders outside a Tauri window
@@ -167,6 +168,7 @@ function setStatus(msg, isError = false) {
 
 // Render a centered message (loading / empty / error) inside a pane body.
 function setPaneMessage(body, text, isError = false) {
+  body._entries = null; // a message replaces the listing — nothing to re-sort
   body.innerHTML = "";
   const div = document.createElement("div");
   div.className = isError ? "pane-msg error" : "pane-msg";
@@ -193,12 +195,35 @@ function log(message, level = "info") {
 }
 
 // ---- Rendering ----
-function sortEntries(entries) {
-  return entries.sort((a, b) => {
-    const ad = a.kind === "dir";
-    const bd = b.kind === "dir";
-    if (ad !== bd) return ad ? -1 : 1;
-    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+// Per-pane column sort (session-only): which column and which direction
+// (1 asc, -1 desc). Clicking a list header cell changes it (see setSort).
+const sortState = {
+  local: { key: "name", dir: 1 },
+  remote: { key: "name", dir: 1 },
+};
+
+function sortEntries(entries, side) {
+  const s = sortState[side];
+  return entries.sort(entryComparator(s.key, s.dir));
+}
+
+// Re-sort a pane by `key`: clicking the current sort column flips direction,
+// a new column starts ascending. Re-renders from the pane's cached listing.
+function setSort(side, key) {
+  const s = sortState[side];
+  s.dir = s.key === key ? -s.dir : 1;
+  s.key = key;
+  updateSortIndicators(side);
+  const body = side === "local" ? el.bodyLocal : el.bodyRemote;
+  if (body._entries) renderList(body, body._entries, side);
+}
+
+function updateSortIndicators(side) {
+  const s = sortState[side];
+  document.querySelectorAll(`#pane-${side} .list-head .cell`).forEach((cell) => {
+    const active = cell.dataset.key === s.key;
+    cell.classList.toggle("sorted", active);
+    cell.classList.toggle("desc", active && s.dir === -1);
   });
 }
 
@@ -206,11 +231,12 @@ function sortEntries(entries) {
 let dragItems = null; // items being dragged between panes (the selection)
 
 function renderList(body, entries, side) {
+  body._entries = entries; // cached so setSort can re-render without re-listing
   if (entries.length === 0) {
     setPaneMessage(body, "This folder is empty.");
     return;
   }
-  sortEntries(entries);
+  sortEntries(entries, side);
   body.innerHTML = "";
   body._anchor = null; // fresh listing → reset the shift-select pivot
   const frag = document.createDocumentFragment();
@@ -4105,6 +4131,15 @@ function askConnectBehavior() {
 // ---- Wiring ----
 function wireEvents() {
   el.disconnectBtn.addEventListener("click", doDisconnect);
+
+  // Column sorting: click a list-header cell to sort that pane by it; click
+  // the same column again to flip the direction.
+  for (const side of ["local", "remote"]) {
+    document.querySelectorAll(`#pane-${side} .list-head .cell`).forEach((cell) => {
+      cell.addEventListener("click", () => setSort(side, cell.dataset.key));
+    });
+    updateSortIndicators(side);
+  }
 
   // Quick connect
   document.getElementById("qc-connect").addEventListener("click", quickConnect);

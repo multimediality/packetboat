@@ -90,3 +90,23 @@ export function joinUnder(root, rel) {
 export function normalizeOpRef(v) {
   return v.replace(/^[\s"']+|[\s"']+$/g, "");
 }
+
+// Comparator for file-list entries, sorting by `key` ("name" | "size" |
+// "modified") in direction `dir` (1 ascending, -1 descending). Directories
+// always group before files, whatever the key or direction — only the order
+// *within* each group flips. Name (case-insensitive) breaks ties, so entries
+// with equal sizes/dates stay in a predictable order; directories have no
+// size, so under the "size" key they fall through to the name tiebreak.
+// A missing modified time sorts as oldest.
+export function entryComparator(key, dir = 1) {
+  const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+  return (a, b) => {
+    const ad = a.kind === "dir";
+    if (ad !== (b.kind === "dir")) return ad ? -1 : 1;
+    let cmp = 0;
+    if (key === "size" && !ad) cmp = a.size - b.size;
+    else if (key === "modified") cmp = (a.modified || 0) - (b.modified || 0);
+    if (cmp === 0) cmp = byName(a, b);
+    return dir * (cmp < 0 ? -1 : cmp > 0 ? 1 : 0);
+  };
+}

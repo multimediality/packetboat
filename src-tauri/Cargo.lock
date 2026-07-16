@@ -3794,7 +3794,7 @@ dependencies = [
 
 [[package]]
 name = "packetboat"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

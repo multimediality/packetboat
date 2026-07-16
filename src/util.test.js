@@ -13,6 +13,7 @@ import {
   relativeUnder,
   joinUnder,
   normalizeOpRef,
+  entryComparator,
 } from "./util.js";
 
 test("joinPath collapses a trailing separator on the base", () => {
@@ -86,4 +87,29 @@ test("normalizeOpRef strips 1Password's surrounding quotes/whitespace", () => {
     normalizeOpRef('"op://Dev/Shock Hosting/cPanel User/password"'),
     "op://Dev/Shock Hosting/cPanel User/password",
   );
+});
+
+// ---- entryComparator ----
+
+const dir = (name, modified) => ({ name, kind: "dir", size: 0, modified });
+const file = (name, size, modified) => ({ name, kind: "file", size, modified });
+const names = (entries, key, d) => entries.slice().sort(entryComparator(key, d)).map((e) => e.name);
+
+test("entryComparator sorts by name, dirs first, case-insensitive", () => {
+  const entries = [file("beta.txt", 1), dir("zeta"), file("Alpha.txt", 2), dir("Apps")];
+  assert.deepEqual(names(entries, "name", 1), ["Apps", "zeta", "Alpha.txt", "beta.txt"]);
+  // Descending flips order within each group, but dirs stay on top.
+  assert.deepEqual(names(entries, "name", -1), ["zeta", "Apps", "beta.txt", "Alpha.txt"]);
+});
+
+test("entryComparator sorts by size with a name tiebreak; dirs by name", () => {
+  const entries = [file("big.bin", 3000), file("b-small.txt", 5), file("a-small.txt", 5), dir("sub")];
+  assert.deepEqual(names(entries, "size", 1), ["sub", "a-small.txt", "b-small.txt", "big.bin"]);
+  assert.deepEqual(names(entries, "size", -1), ["sub", "big.bin", "b-small.txt", "a-small.txt"]);
+});
+
+test("entryComparator sorts by modified; missing dates sort oldest", () => {
+  const entries = [file("new.txt", 1, 2000), dir("old-dir", 500), file("undated.txt", 1), dir("new-dir", 1500)];
+  assert.deepEqual(names(entries, "modified", 1), ["old-dir", "new-dir", "undated.txt", "new.txt"]);
+  assert.deepEqual(names(entries, "modified", -1), ["new-dir", "old-dir", "new.txt", "undated.txt"]);
 });

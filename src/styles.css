@@ -743,6 +743,27 @@ input[type="number"]::-webkit-inner-spin-button {
   background: var(--surface);
 }
 
+/* Header cells sort their column on click. */
+.list-head .cell {
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.list-head .cell:hover {
+  color: var(--text);
+}
+
+.list-head .cell.sorted::after {
+  content: "▲";
+  margin-left: 6px;
+  font-size: 8px;
+}
+
+.list-head .cell.sorted.desc::after {
+  content: "▼";
+}
+
 .list-body {
   flex: 1;
   overflow-y: auto;
@@ -817,16 +838,16 @@ input[type="number"]::-webkit-inner-spin-button {
   white-space: nowrap;
 }
 
+/* Size and date inherit the row's font-size (13px) / the header's (via
+   .list-head), so all three columns render in one consistent style. */
 .cell.size {
   text-align: right;
   font-variant-numeric: tabular-nums;
   color: var(--muted);
-  font-size: 13px;
 }
 
 .cell.date {
   color: var(--muted);
-  font-size: 12.5px;
   font-variant-numeric: tabular-nums;
 }
 
