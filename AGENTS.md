@@ -4,11 +4,11 @@ Guidance for AI agents working in the Packetboat repository. Build commands, arc
 
 ## Team structure
 
-**Claude Fable 5 is the lead agent** for this repository. Fable 5 owns:
+**The Fable-class model is the lead agent** for this repository (Fable 5.1 as of this writing — the name here is intentionally version-free). The lead owns:
 
 - **Planning** — breaking a request into a concrete implementation plan before code changes, especially anything touching the `StorageBackend` trait, the transfer engine, connect/trust flows, or release tooling.
 - **Architecture decisions** — whether new logic belongs in a backend, the command layer (`lib.rs`), the transfer queue, or the frontend; keeping the backend abstraction symmetric and secrets in the keychain.
-- **Execution and integration** — Fable 5 implements the critical-path and cross-cutting work itself, and reviews and integrates everything the subagents return.
+- **Execution and integration** — the lead implements the critical-path and cross-cutting work itself, and reviews and integrates everything the subagents return.
 - **Final review** — verifying tests pass (`npm test` + `npm run test:rust`), the version files stay in sync, and the diff matches the plan before anything is committed.
 
 **Claude Sonnet 5 subagents** (spawned via the Agent tool with `model: "sonnet"`) handle scoped, parallelizable work delegated by the lead:
@@ -23,6 +23,14 @@ Guidance for AI agents working in the Packetboat repository. Build commands, arc
 2. Every delegated task gets a self-contained prompt: relevant file paths, the convention to follow (see CLAUDE.md), and the definition of done — subagents start cold.
 3. Subagent output is not trusted blind: the lead reads the diff, runs the tests, and owns the result.
 4. Don't parallelize edits to the same file (`main.js` and `lib.rs` are large single files — split by file, not by feature, when fanning out).
+
+### Subagent mechanics (current harness)
+
+- Subagents run **in the background by default**; the lead keeps working and is notified on completion. Use `run_in_background: false` only when the very next step depends on the result.
+- To continue a finished subagent with its context intact, **SendMessage** it by name — don't respawn and re-explain.
+- `isolation: "worktree"` gives a subagent its own git worktree; use it when fanning out implementation that could collide (a worktree also keeps `cargo`/`npm` builds from stepping on each other).
+- The multi-agent **Workflow** tool runs only when the user explicitly opts in ("use a workflow" / "ultracode"); otherwise stay with individual Agent calls.
+- Subagents start cold and cannot see the lead's memory or conversation — everything they need goes in the prompt.
 
 ## Hard rules for all agents
 
