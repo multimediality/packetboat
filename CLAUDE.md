@@ -73,6 +73,20 @@ Persisted config (sites, known hosts, trusted certs) lives in `config_dir()` —
 
 Rust tests are `#[cfg(test)]` modules at the bottom of the file they cover, focused on pure helpers prone to silent regression (path conventions, retry heuristic, `Site` defaults, cert fingerprinting, op:// parsing). Frontend tests cover `util.js` only — UI logic in `main.js` is not unit-tested. There is no lint/format step for the JS side.
 
+## Working agreement (summary; full text in AGENTS.md)
+
+- Every request gets a checkable "done when"; if none is given, propose one and work to it. Rerun the check after the last edit.
+- Never commit or push unless asked in the current turn. Before proposing a commit, list changed files and flag anything not explicitly requested.
+- Understand before changing: reproduce or read the failing path and state the suspected cause; a fix Steven proposes is a hypothesis to confirm.
+- Ask first for commits, pushes, releases, version bumps, and anything touching signing or the updater. When in doubt, ask briefly with a recommendation.
+- Facts that get re-asked go in "Repo facts" below, not chat.
+
+## Repo facts (things that get re-asked)
+
+- Next version: run `npm run version:check`, state the current number, then propose minor for a feature build and patch for a fixes-only build. Releases are real releases (not pre-release) because the updater reads `releases/latest`.
+- Signing on Windows: `npm run build:local` resolves the key and password via `scripts/signing-key.ps1` (1Password / env / gitignored pass file). If the script prompts for a password instead of using 1Password, that resolution chain is what to check.
+- Bugs, ideas, and decisions with rationale: `docs/TODO.md`.
+
 ## Notes
 
 - `docs/TODO.md` tracks bugs/ideas; `docs/1password-integration.md` documents the 1Password logon type.
