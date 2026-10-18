@@ -1,0 +1,16 @@
+{
+  "Endpoint": "https://eus.codesigning.azure.net",
+  "CodeSigningAccountName": "scdemanett-signing",
+  "CertificateProfileName": "scdemanett-public-trust",
+  "ExcludeCredentials": [
+    "EnvironmentCredential",
+    "WorkloadIdentityCredential",
+    "ManagedIdentityCredential",
+    "SharedTokenCacheCredential",
+    "VisualStudioCredential",
+    "VisualStudioCodeCredential",
+    "AzurePowerShellCredential",
+    "AzureDeveloperCliCredential",
+    "InteractiveBrowserCredential"
+  ]
+}

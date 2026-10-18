@@ -1,0 +1,26 @@
+{
+  "bundle": {
+    "windows": {
+      "signCommand": {
+        "cmd": "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.26100.0\\x64\\signtool.exe",
+        "args": [
+          "sign",
+          "/v",
+          "/fd",
+          "SHA256",
+          "/tr",
+          "http://timestamp.acs.microsoft.com",
+          "/td",
+          "SHA256",
+          "/dlib",
+          ".artifact-signing\\bin\\x64\\Azure.CodeSigning.Dlib.dll",
+          "/dmdf",
+          "artifact-signing.json",
+          "/d",
+          "Packetboat",
+          "%1"
+        ]
+      }
+    }
+  }
+}

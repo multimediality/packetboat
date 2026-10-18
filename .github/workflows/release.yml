@@ -74,6 +74,7 @@ jobs:
     needs: verify
     permissions:
       contents: write # tauri-action needs this to create the release
+      id-token: write # OIDC token for the Azure login (Windows signing)
     strategy:
       fail-fast: false
       matrix:
@@ -88,6 +89,14 @@ jobs:
             args: ""
 
     runs-on: ${{ matrix.platform }}
+    # The Artifact Signing app registration trusts this environment's OIDC
+    # token (subject repo:multimediality@246642278/packetboat@1283591142:environment:release).
+    environment: ${{ matrix.platform == 'windows-latest' && vars.AZURE_CLIENT_ID != '' && 'release' || '' }}
+    env:
+      # Authenticode signing through Azure Artifact Signing (README, "Code
+      # signing"); forks and runs without the Azure variables build unsigned.
+      SIGN_WINDOWS: ${{ matrix.platform == 'windows-latest' && vars.AZURE_CLIENT_ID != '' }}
+      SIGNING_CLIENT_VERSION: 1.0.146
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -128,6 +137,33 @@ jobs:
       - name: Install the Tauri CLI
         run: npm install
 
+      # signCommand in tauri.signed.conf.json runs the runner's signtool
+      # (Windows SDK 10.0.26100) with Microsoft's Artifact Signing dlib, which
+      # authenticates through the Azure CLI session from azure/login (OIDC, no
+      # client secret). The GitHub OIDC token expires within minutes, so a
+      # codesigning access token (valid about an hour) is fetched right away
+      # and the dlib reuses it from the CLI's cache during the build.
+      - name: Azure login
+        if: env.SIGN_WINDOWS == 'true'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Fetch Artifact Signing client
+        if: env.SIGN_WINDOWS == 'true'
+        shell: pwsh
+        run: |
+          az account get-access-token --resource https://codesigning.azure.net --query expiresOn -o tsv
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $pkg = "$env:RUNNER_TEMP\artifact-signing-client.zip"
+          Invoke-WebRequest "https://www.nuget.org/api/v2/package/Microsoft.ArtifactSigning.Client/$env:SIGNING_CLIENT_VERSION" -OutFile $pkg
+          Expand-Archive $pkg -DestinationPath src-tauri\.artifact-signing
+
+      # Windows builds add the signing overlay when the Azure variables are
+      # set; Tauri then signs the app exe, the NSIS installer and uninstaller,
+      # and the MSI, before the updater signatures are made.
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -160,15 +196,18 @@ jobs:
             The `latest.json`, `.sig`, and `.app.tar.gz` files are used by the in-app
             auto-updater — you don't need them for a manual install.
 
-            ### First launch (unsigned builds)
+            ### First launch
 
-            These installers aren't OS-code-signed yet, so you may get a warning:
+            The Windows installers are Authenticode-signed (publisher Steven
+            Demanett). The macOS builds aren't code-signed yet, so you may get a
+            warning there:
 
             - **macOS** — if it says *"Packetboat is damaged and can't be opened"*,
               that's Gatekeeper on the unsigned download, not real damage. Move it
               to Applications, then run:
               `xattr -dr com.apple.quarantine /Applications/Packetboat.app`
-            - **Windows** — on the SmartScreen prompt, click **More info → Run anyway**.
+            - **Windows** — SmartScreen can still warn while the new signing
+              certificate builds reputation; click **More info → Run anyway**.
           # Publish immediately (no manual draft step).
           releaseDraft: false
           # Publish as normal (non-pre-release) releases so GitHub's
@@ -176,4 +215,4 @@ jobs:
           # Marking 0.x as pre-release hides it from `releases/latest`, which 404s
           # the updater. Revisit if/when a pre-release-aware update feed is added.
           prerelease: false
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} ${{ env.SIGN_WINDOWS == 'true' && '--config src-tauri/tauri.signed.conf.json' || '' }}

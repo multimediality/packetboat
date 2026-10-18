@@ -22,6 +22,9 @@ design/
 # Tauri updater signing keys (public key is embedded in tauri.conf.json)
 .tauri/
 
+# Artifact Signing client, downloaded by the release workflow for Windows signing
+src-tauri/.artifact-signing/
+
 # Logs
 logs
 *.log

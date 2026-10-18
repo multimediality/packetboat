@@ -47,8 +47,9 @@ clean dual-pane client, dark by default and free of adware.
 
 ## Installing
 
-The release installers aren't OS-code-signed yet, so your system may warn you on
-first launch. It's safe to continue:
+The Windows installers are Authenticode-signed; the macOS builds aren't
+code-signed yet, so your system may warn you on first launch. It's safe to
+continue:
 
 - **macOS** (Apple Silicon or Intel): if you see *"Packetboat is damaged and
   can't be opened"*, that's Gatekeeper reacting to the unsigned download — not
@@ -57,11 +58,11 @@ first launch. It's safe to continue:
   ```sh
   xattr -dr com.apple.quarantine /Applications/Packetboat.app
   ```
-- **Windows**: SmartScreen may show *"Windows protected your PC"*. Click **More
-  info → Run anyway**.
+- **Windows**: SmartScreen may still show *"Windows protected your PC"* while
+  the signing certificate builds reputation. Click **More info → Run anyway**.
 
-Proper code signing (Apple Developer ID + notarization; Windows Authenticode) is
-planned to make these warnings go away.
+Apple Developer ID signing + notarization is planned to make the macOS warning
+go away.
 
 ## Stack
 
@@ -183,6 +184,23 @@ prompt; otherwise it falls back to your signed-in 1Password desktop-app session.
 Override `PACKETBOAT_OP_PASSWORD_REF` for a different item (or edit the default
 in [scripts/signing-key.ps1](scripts/signing-key.ps1)). CI signs from GitHub
 secrets and doesn't use this script.
+
+### Code signing
+
+Windows release builds are Authenticode-signed through Azure Artifact Signing
+(account `scdemanett-signing`, certificate profile `scdemanett-public-trust`,
+named in `src-tauri/artifact-signing.json`). The overlay
+`src-tauri/tauri.signed.conf.json` sets `bundle.windows.signCommand` to the
+Windows SDK's signtool with Microsoft's Artifact Signing dlib, and Tauri runs it
+on the app exe, the NSIS installer and uninstaller, and the MSI, before the
+updater signatures are made. The release workflow logs in with `azure/login`
+through OIDC (no client secret): the Entra app registration
+`github-artifact-signing` holds the Artifact Signing Certificate Profile Signer
+role on the account and a federated credential for this repository's `release`
+environment, which the Windows build job runs in. Its IDs are the repository
+variables `AZURE_TENANT_ID` and `AZURE_CLIENT_ID`; without them (forks) the
+overlay is skipped and builds stay unsigned. Local builds are not
+Authenticode-signed.
 
 ## Auto-updates
 
