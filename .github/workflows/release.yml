@@ -182,7 +182,7 @@ jobs:
       # tags skip both; the updater uses NSIS and AppImage.
       - name: Build and release
         id: tauri_build
-        uses: tauri-apps/tauri-action@v0.6.2
+        uses: tauri-apps/tauri-action@v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # The Windows aws-lc-sys NASM workaround also lives in
