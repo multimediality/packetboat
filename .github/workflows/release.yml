@@ -237,7 +237,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.label }}
-          path: ${{ join(fromJSON(steps.tauri_build.outputs.artifactPaths), '\n') }}
+          # Double-quoted so YAML turns the \n into a newline (one path per
+          # line), as in Torrent Remote; unquoted, the paths fuse into one.
+          path: "${{ join(fromJSON(steps.tauri_build.outputs.artifactPaths), '\n') }}"
 
   # The updater reads latest.json from the latest published release, so only
   # publish once all platform builds have added their assets and entries.
