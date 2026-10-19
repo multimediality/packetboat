@@ -4,6 +4,7 @@
 //
 //   node scripts/version.mjs            # check: print every file's version + verify they match
 //   node scripts/version.mjs 0.5.0      # set an explicit version everywhere
+//   node scripts/version.mjs 0.5.0-rc.1 # explicit pre-release (tag v0.5.0-rc.1 → GitHub pre-release)
 //   node scripts/version.mjs patch      # bump patch / minor / major from the current version
 //
 // Files kept in sync: package.json, src-tauri/tauri.conf.json,
@@ -30,7 +31,7 @@ const FILES = {
   "Cargo.lock": [path.join(root, "src-tauri", "Cargo.lock"), CARGO_LOCK_RE],
 };
 
-const SEMVER = /^\d+\.\d+\.\d+$/;
+const SEMVER = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 const read = (p) => fs.readFileSync(p, "utf8");
 
 function currentVersions() {
@@ -98,7 +99,7 @@ function main() {
     }
     target = bump([...distinct][0], arg);
   } else {
-    console.error("Usage: node scripts/version.mjs [<X.Y.Z> | patch | minor | major]");
+    console.error("Usage: node scripts/version.mjs [<X.Y.Z>[-pre] | patch | minor | major]");
     process.exit(1);
   }
 

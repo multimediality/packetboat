@@ -148,9 +148,14 @@ error/reference parsing.
 Pushing a version tag (e.g. `v0.1.0`) triggers the
 [release workflow](.github/workflows/release.yml), which builds and **publishes**
 a GitHub release with installers for Windows, macOS (Intel + Apple Silicon), and
-Linux. Releases are published as normal (non-pre-release) releases on purpose:
-GitHub's `releases/latest` — the in-app updater endpoint — skips pre-releases, so
-marking them pre-release would hide every build from the updater.
+Linux. The release stays a draft until every platform has uploaded, so GitHub's
+`releases/latest` — the in-app updater endpoint — never points at a half-built
+release. A plain `vX.Y.Z` tag becomes a normal release that the updater offers; a
+tag with a pre-release suffix (`v0.5.0-rc.1`, after `npm run bump -- 0.5.0-rc.1`)
+becomes a GitHub pre-release, which the updater skips, for testing a build
+without shipping it (it has no MSI or RPM, which can't carry such versions).
+Running the workflow from the Actions tab is a dry run: it builds everything and
+attaches the bundles to the workflow run, without creating a tag or release.
 
 Bump the version with the sync script ([scripts/version.mjs](scripts/version.mjs))
 so `package.json`, `tauri.conf.json`, `Cargo.toml`, and `Cargo.lock` never drift:

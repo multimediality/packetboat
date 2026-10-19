@@ -34,7 +34,7 @@ npm run version:check    # verify all four files match
 npm run bump -- patch    # or minor / major / an explicit version like 1.3.0
 ```
 
-Pushing a tag `vX.Y.Z` triggers `.github/workflows/release.yml`, which builds installers for Windows/macOS/Linux and publishes a GitHub release. Releases are deliberately **not** marked pre-release — the in-app updater reads `releases/latest`, which skips pre-releases.
+Pushing a tag `vX.Y.Z` triggers `.github/workflows/release.yml`, which builds installers for Windows/macOS/Linux into a draft release and publishes it once every platform is done. Plain `vX.Y.Z` tags are normal releases, which the in-app updater (reading `releases/latest`) offers; tags with a pre-release suffix (`v1.3.0-rc.1`) become GitHub pre-releases that the updater skips, with no MSI or RPM. A manual run from the Actions tab is a build-only dry run.
 
 `npm run build` signs updater artifacts (`createUpdaterArtifacts` is enabled), so it needs `TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)` in the environment; on Windows use `npm run build:local` instead, which resolves them from `.tauri/packetboat.key` + 1Password / env / a gitignored pass file. The Windows crypto build needs no NASM install — `src-tauri/.cargo/config.toml` sets `AWS_LC_SYS_PREBUILT_NASM=1`.
 
@@ -83,7 +83,7 @@ Rust tests are `#[cfg(test)]` modules at the bottom of the file they cover, focu
 
 ## Repo facts (things that get re-asked)
 
-- Next version: run `npm run version:check`, state the current number, then propose minor for a feature build and patch for a fixes-only build. Releases are real releases (not pre-release) because the updater reads `releases/latest`.
+- Next version: run `npm run version:check`, state the current number, then propose minor for a feature build and patch for a fixes-only build. Shipped versions are plain `vX.Y.Z` tags (real releases, because the updater reads `releases/latest`); use a `-rc.N` pre-release tag only to test a release build without shipping it.
 - Signing on Windows: `npm run build:local` resolves the key and password via `scripts/signing-key.ps1` (1Password / env / gitignored pass file). If the script prompts for a password instead of using 1Password, that resolution chain is what to check.
 - Bugs, ideas, and decisions with rationale: `docs/TODO.md`.
 
