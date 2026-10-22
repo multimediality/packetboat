@@ -9,6 +9,12 @@ clean dual-pane client, dark by default and free of adware.
 > bucket; S3 and WebDAV are wired and locally verified but not yet exercised
 > against every provider.
 
+## Screenshots
+
+### Main window
+
+![Main window with the quickconnect bar, message log, local and remote panes with folder trees and file lists, and the transfer queue](docs/screenshots/main.webp)
+
 ## Features
 
 - **Protocols** — SFTP ([`russh`]), FTP/FTPS ([`suppaftp`] + rustls), and cloud

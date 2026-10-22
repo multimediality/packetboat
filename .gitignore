@@ -9,8 +9,9 @@ target/
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
-# Documentation
-docs/
+# Documentation (private, except the README screenshots)
+docs/*
+!docs/screenshots/
 design/
 
 # Local Claude / Cursor agent settings
