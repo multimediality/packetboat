@@ -490,6 +490,7 @@ async function navigateRemote(path) {
   setPaneMessage(el.bodyRemote, "Loading…");
   try {
     const entries = await invoke("list_remote", { id, path });
+    noteRemoteResult(id, null);
     if (id !== activeTabId) return; // switched tabs mid-load — stale result
     state.remote.path = path;
     el.pathRemote.value = path;
@@ -502,6 +503,7 @@ async function navigateRemote(path) {
     // which mirrors it into the status bar — no verbose error wall, no triplate.
     setPaneMessage(el.bodyRemote, "Couldn't open this folder.", true);
     log(`Could not list ${path}: ${e}`, "error");
+    noteRemoteResult(id, e);
   }
 }
 
@@ -1006,8 +1008,29 @@ async function closeTab(id) {
 
 function syncRemoteUI() {
   const tab = activeTab();
-  if (tab) setConnState(true, tab.label);
-  else setConnState(false, "Not connected");
+  if (!tab) {
+    setConnState(false, "Not connected");
+    return;
+  }
+  setConnState(true, tab.lost ? `${tab.label} — connection lost` : tab.label);
+  // A lost link keeps the pane usable (the backend reconnects on the next
+  // action) but the dot goes off so the state is honest.
+  if (tab.lost) el.connStatus.dataset.state = "off";
+}
+
+// The backend reconnects a dropped SFTP/FTP session by itself on the next
+// operation; when that fails too, the error says "connection lost". Track it
+// per tab (and show it for the active one) until a remote operation on that
+// connection succeeds again.
+function noteRemoteResult(id, err) {
+  const tab = tabs.find((t) => t.id === id);
+  if (!tab) return;
+  const lost = err != null && /connection lost/i.test(String(err));
+  if (lost === !!tab.lost) return;
+  tab.lost = lost;
+  if (lost) log(`Connection to ${tab.label} lost — it will be retried on the next action.`, "error");
+  else log(`Reconnected to ${tab.label}.`, "success");
+  if (id === activeTabId) syncRemoteUI();
 }
 
 function renderTabs() {
@@ -3394,6 +3417,7 @@ function onTransferUpdate(u) {
         if (it.connectionId != null) queueRun.conns.add(it.connectionId);
         setRowStatus(it, "success");
         log(`Transfer complete: ${it.name}`, "success");
+        noteRemoteResult(it.connectionId, null);
         // Show the result in the destination pane (debounced so a folder of
         // many files refreshes once, not per file).
         scheduleRefresh(it.direction === "download" ? "local" : "remote");
@@ -3417,6 +3441,7 @@ function onTransferUpdate(u) {
         queueRun.failed++;
         if (it.connectionId != null) queueRun.conns.add(it.connectionId);
         setRowStatus(it, "failed");
+        noteRemoteResult(it.connectionId, u.message);
       }
       log(`Transfer failed: ${u.message}`, "error");
       break;

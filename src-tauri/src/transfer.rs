@@ -362,6 +362,9 @@ fn is_retryable(e: &BackendError) -> bool {
         "10054",
         " eof",
         "421",
+        // A dropped SFTP session: the backend reconnects on the retry's open.
+        "session closed",
+        "sender dropped",
         "temporar",
         // A stalled transfer retries: the stalled attempt's pooled connection is
         // dropped, so the retry runs on a fresh connection, which often clears a
@@ -524,6 +527,8 @@ mod tests {
             "os error 10054",
             "421 service not available",
             "transfer stalled: no data moved for 60s",
+            "SFTP error: session closed",
+            "sender dropped",
         ] {
             assert!(is_retryable(&BackendError::Other(m.into())), "should retry: {m}");
         }

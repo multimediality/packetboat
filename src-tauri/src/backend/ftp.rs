@@ -385,7 +385,9 @@ impl FtpBackend {
     /// throwaway capture is fine here.
     async fn reconnect(&self) -> BackendResult<()> {
         let capture: CertCapture = Arc::new(StdMutex::new(None));
-        let fresh = establish(&self.config, &capture).await?;
+        let fresh = establish(&self.config, &capture)
+            .await
+            .map_err(|e| BackendError::Other(format!("connection lost — reconnect failed: {e}")))?;
         *self.conn.lock().await = fresh;
         Ok(())
     }
