@@ -3018,6 +3018,7 @@ async function importExternalFiles(items, destSide, destDir) {
   let inFlight = 0;
   const slotWaiters = [];
   const uploads = [];
+  let queued = 0;
   externalImportPoke = () => slotWaiters.splice(0).forEach((w) => w());
   const runLimited = async (fn) => {
     while (inFlight >= limitNow()) await new Promise((res) => slotWaiters.push(res));
@@ -3051,23 +3052,36 @@ async function importExternalFiles(items, destSide, destDir) {
       log(`Skipped ${file.name} — target already exists.`);
       continue;
     }
+    // The row goes up now, so the whole drop shows as Queued at once rather
+    // than only the few files holding an upload slot. Bytes are still read
+    // only once a worker gets a slot (the memory bound above is unchanged).
+    const rowIt = addQueueRow({ id: `ext-${++extRowCounter}`, direction, name: file.name, size: file.size });
+    queued++;
     // Conflict checks stay sequential (prompts can't overlap), but the actual
     // uploads run a few at a time through the limiter below.
-    uploads.push(runLimited(() => uploadDroppedFile(file, dir, r.name, direction, destSide)));
+    uploads.push(runLimited(() => uploadDroppedFile(file, dir, r.name, direction, destSide, rowIt)));
   }
+  if (queued > 1) log(`Queued ${queued} files from the drop.`);
   await Promise.all(uploads);
   refresh(destSide);
 }
 
 // One OS-dropped file: read its bytes, send them via put_bytes, and drive its
-// hand-managed queue row (active → Done/Failed; no byte progress — put_bytes
-// is a single call). OS drops don't ride the transfer engine, so the row is
-// ours to update.
-async function uploadDroppedFile(file, dir, name, direction, destSide) {
-  if (externalImportAbort) return; // stopped while waiting for an upload slot
-  const rowIt = addQueueRow({ id: `ext-${++extRowCounter}`, direction, name: file.name, size: file.size });
+// hand-managed queue row (Queued → active → Done/Failed; no byte progress —
+// put_bytes is a single call). OS drops don't ride the transfer engine, so the
+// row (created by importExternalFiles when the file was accepted) is ours to
+// update.
+async function uploadDroppedFile(file, dir, name, direction, destSide, rowIt) {
+  if (externalImportAbort || (rowIt && rowIt.cancelled)) {
+    // Stopped or cancelled while waiting for an upload slot.
+    if (rowIt && rowIt.row.dataset.status === "active") markDropRowCancelled(rowIt);
+    return;
+  }
   if (rowIt) {
-    rowIt.cancelBtn.hidden = true; // no per-file cancel — the toolbar Stop covers drops
+    // put_bytes is one call, so there's no mid-flight cancel; the toolbar Stop
+    // covers the rest of the drop.
+    rowIt.inFlight = true;
+    rowIt.cancelBtn.hidden = true;
     rowIt.stat.textContent = destSide === "remote" ? "Uploading…" : "Importing…";
   }
   try {
@@ -3101,6 +3115,14 @@ async function uploadDroppedFile(file, dir, name, direction, destSide) {
       externalImportAbort = true;
     }
   }
+}
+
+// A queued OS-drop row that won't be uploaded (Stop, or its ✕): mirrors the
+// engine's "Cancelled" rows. No retry — drops have no request to re-enqueue.
+function markDropRowCancelled(it) {
+  it.stat.textContent = "Cancelled";
+  setRowStatus(it, "failed");
+  it.retryBtn.hidden = true;
 }
 
 // Flatten a dropped FileSystemEntry tree (webkitGetAsEntry) into `out.dirs`
@@ -3154,6 +3176,9 @@ async function walkDroppedEntries(entries, rel, out) {
 // while, and a second drop meanwhile would start an overlapping import that
 // fights the first with conflict prompts.
 let externalImportActive = false;
+// Drops that arrive while one is importing wait here (FIFO) and start as the
+// current import finishes, so dropping during a transfer still queues.
+const pendingImports = [];
 // Set by the Stop toolbar button; the import loops check it between steps.
 let externalImportAbort = false;
 // Wakes a running import's parked upload workers after a limits change, so a
@@ -3176,6 +3201,10 @@ function updateStopButton() {
 function stopAllActivity() {
   log("Stopping transfers…");
   if (externalImportActive) externalImportAbort = true;
+  if (pendingImports.length > 0) {
+    log(`Discarded ${pendingImports.length} waiting drop${pendingImports.length === 1 ? "" : "s"}.`);
+    pendingImports.length = 0;
+  }
   for (const id of activeWalks) invoke("cancel_tree", { walkId: id }).catch(() => {});
   for (const [id, it] of queue) {
     if (it.row.dataset.status === "active") cancelTransfer(id);
@@ -3184,7 +3213,10 @@ function stopAllActivity() {
 
 async function runExternalImport(task) {
   if (externalImportActive) {
-    log("Still importing the previous drop — this one was ignored.", "error");
+    // Imports can't overlap (see above), so the drop waits its turn instead of
+    // being ignored; it starts as soon as the current import's last upload ends.
+    pendingImports.push(task);
+    log(`Drop queued — it starts when the current import finishes (${pendingImports.length} waiting).`);
     return;
   }
   externalImportActive = true;
@@ -3195,15 +3227,24 @@ async function runExternalImport(task) {
   conflictCache.clear();
   try {
     await task();
+  } catch (e) {
+    log(`Import failed: ${e}`, "error");
   } finally {
     externalImportActive = false;
     externalImportAbort = false;
     externalImportPoke = null;
     updateStopButton();
-    // One summary notification per drop (per-file drain events are suppressed
-    // while the import runs). If engine transfers are still active, skip —
-    // their eventual drain reports the combined tally.
-    if (prevActiveCount === 0) notifyQueueDrained();
+    const next = pendingImports.shift();
+    if (next) {
+      // Start the waiting drop right away (no await in between, so the drain
+      // logic in updateQueueCounts never sees the import as finished).
+      runExternalImport(next);
+    } else if (prevActiveCount === 0) {
+      // One summary notification per run of drops (per-file drain events are
+      // suppressed while an import runs). If engine transfers are still
+      // active, skip — their eventual drain reports the combined tally.
+      notifyQueueDrained();
+    }
   }
 }
 
@@ -3572,6 +3613,16 @@ function switchQueueTab(tab) {
 }
 
 async function cancelTransfer(id) {
+  // OS-drop rows (string ids) have no engine transfer: a queued one is dropped
+  // before its upload starts; one already in put_bytes can't be interrupted.
+  if (typeof id === "string") {
+    const it = queue.get(id);
+    if (it && !it.inFlight && it.row.dataset.status === "active") {
+      it.cancelled = true;
+      markDropRowCancelled(it);
+    }
+    return;
+  }
   try {
     await invoke("cancel_transfer", { id });
   } catch (e) {
