@@ -1,7 +1,18 @@
 # Packetboat
 
+[![Latest release](https://img.shields.io/github/v/release/multimediality/packetboat?label=release)](https://github.com/multimediality/packetboat/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/multimediality/packetboat/total)](https://github.com/multimediality/packetboat/releases)
+[![License: GPL-3.0](https://img.shields.io/github/license/multimediality/packetboat)](LICENSE)
+[![Built with Tauri 2](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB)](https://tauri.app)
+
 A modern, cross-platform file-transfer client — FTP-first, cloud-capable. A
-clean dual-pane client, dark by default and free of adware.
+clean dual-pane client, dark by default and free of adware. SFTP, FTP/FTPS,
+and cloud storage (S3 & S3-compatible, Backblaze B2, WebDAV) for Windows,
+macOS, and Linux.
+
+**Website: [packetboat.app](https://packetboat.app)** ·
+[Download](https://github.com/multimediality/packetboat/releases/latest) ·
+[Docs](https://packetboat.app/docs.html)
 
 > **Status:** working desktop app. SFTP, FTP/FTPS, and cloud backends (S3 &
 > S3-compatible, Backblaze B2, WebDAV) all run behind one storage abstraction.
@@ -52,6 +63,11 @@ clean dual-pane client, dark by default and free of adware.
   Transfers / Updates tabs) with dark / light / system theming.
 
 ## Installing
+
+Grab the installer for your platform from the
+[latest release](https://github.com/multimediality/packetboat/releases/latest):
+Windows `.exe` / `.msi`, macOS `.dmg` (Apple Silicon & Intel), Linux `.deb` /
+`.rpm` / `.AppImage`. Every release has a "which download do I need?" guide.
 
 The Windows installers are Authenticode-signed; the macOS builds aren't
 code-signed yet, so your system may warn you on first launch. It's safe to
